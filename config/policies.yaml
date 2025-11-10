@@ -1,0 +1,36 @@
+modes:
+  default: WORKING
+  quiet_hours: "22:00-07:00"
+
+rules:
+  - name: package_default
+    if: "intent=='package_drop'"
+    then:
+      speak: "Thanks! You can leave it on the step."
+      notify: "summary"
+      log: true
+
+  - name: block_sales_when_busy
+    if: "intent=='sales_solicit' and mode in ['WORKING','SLEEPING']"
+    then:
+      speak: "Sorry, we don't accept solicitations. Please leave a card."
+      notify: false
+      log: true
+
+  - name: neighbor_maybe_urgent
+    if: "intent=='neighbor_help'"
+    then:
+      speak: "Hi! Is this urgent, or can it wait?"
+      notify: "normal"
+      log: true
+
+  - name: authority_always_priority
+    if: "intent=='authority_urgent' or uniform in ['police','fire']"
+    then:
+      speak: "Hello—alerting the homeowner now."
+      notify: "priority"
+      log: true
+
+fallback:
+  speak: "Sorry—could you repeat that?"
+  notify: "normal"
