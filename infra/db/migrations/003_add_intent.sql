@@ -23,8 +23,11 @@ CREATE TABLE IF NOT EXISTS pattern_def (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   pattern TEXT NOT NULL,                 -- "midco", "xcel energy", "internet technician", "solar quote"
   is_regex INTEGER NOT NULL DEFAULT 0,   -- 0=substring, 1=regex (case-insensitive)
+
+  -- Legacy/intent fields (still supported)
   entity_name TEXT,                      -- FK by name for convenience
   intent_name TEXT,                      -- optional direct intent mapping
+
   weight REAL NOT NULL DEFAULT 1.0,
   FOREIGN KEY (intent_name) REFERENCES intent_def(name) ON DELETE SET NULL,
   FOREIGN KEY (entity_name) REFERENCES entity_def(name) ON DELETE SET NULL
@@ -37,6 +40,8 @@ INSERT OR IGNORE INTO intent_def(name, description) VALUES
  ('neighbor_help','Neighbor asking for help or to notify'),
  ('authority_urgent','Police/Fire or urgent authority'),
  ('technician_visit','Utility/ISP scheduled/unscheduled technician'),
+ ('fundraiser_child','Child fundraising for school/scouts/etc'),
+ ('religious_outreach','Religious missionary or outreach'),
  ('unknown','Unclear/other');
 
 -- Seed entities
@@ -52,7 +57,9 @@ INSERT OR IGNORE INTO entity_def(name, tag, intent_hint, weight) VALUES
  ('fire','authority','authority_urgent',1.0);
 
 -- Seed patterns (simple substrings first)
-INSERT OR IGNORE INTO pattern_def(pattern, is_regex, entity_name, intent_name, weight) VALUES
+INSERT OR IGNORE INTO pattern_def
+ (pattern, is_regex, entity_name, intent_name, weight)
+VALUES
  ('midco',0,'midco','technician_visit',1.0),
  ('xcel',0,'xcel','technician_visit',1.0),
  ('xcel energy',0,'xcel','technician_visit',1.0),
@@ -61,10 +68,10 @@ INSERT OR IGNORE INTO pattern_def(pattern, is_regex, entity_name, intent_name, w
  ('service call',0,NULL,'technician_visit',0.6),
  ('internet',0,'midco','technician_visit',0.4),
  ('gas',0,'xcel','technician_visit',0.4),
- ('appointment',0,'xcel','technician_visit',0.6),
- ('plumber',0,'xcel','technician_visit',0.6),
- ('tech',0,'xcel','technician_visit',0.5),
- ('furnace',0,'xcel','technician_visit',0.2),
+ ('appointment',0,NULL,'technician_visit',0.6),
+ ('plumber',0,NULL,'technician_visit',0.6),
+ ('tech',0,NULL,'technician_visit',0.5),
+ ('furnace',0,NULL,'technician_visit',0.2),
  ('power',0,'connexus','technician_visit',0.4),
 
  ('ups',0,'ups','package_drop',1.0),
@@ -85,8 +92,8 @@ INSERT OR IGNORE INTO pattern_def(pattern, is_regex, entity_name, intent_name, w
  ('fence',0,NULL,'neighbor_help',0.5),
  ('tree',0,NULL,'neighbor_help',0.4),
 
+ -- Be careful with "free": very spammy; keep low or drop
  ('solar',0,NULL,'sales_solicit',0.9),
- ('free',0,NULL,'sales_solicit',0.9),
  ('estimate',0,NULL,'sales_solicit',0.7),
  ('promotion',0,NULL,'sales_solicit',0.7),
  ('contract',0,NULL,'sales_solicit',0.2),
@@ -94,4 +101,33 @@ INSERT OR IGNORE INTO pattern_def(pattern, is_regex, entity_name, intent_name, w
  ('going around',0,NULL,'sales_solicit',0.3),
  ('services',0,NULL,'sales_solicit',0.5);
 
-PRAGMA user_version = 3;
+INSERT OR IGNORE INTO pattern_def (pattern, is_regex, entity_name, intent_name, weight) VALUES
+ ('girl scouts',0,NULL,'fundraiser_child',1.0),
+ ('boy scouts',0,NULL,'fundraiser_child',1.0),
+ ('cookie sale',0,NULL,'fundraiser_child',0.8),
+ ('band trip',0,NULL,'fundraiser_child',0.7),
+ ('choir trip',0,NULL,'fundraiser_child',0.7),
+ ('school project',0,NULL,'fundraiser_child',0.7),
+ ('booster club',0,NULL,'fundraiser_child',0.6),
+ ('car wash',0,NULL,'fundraiser_child',0.6),
+ ('bake sale',0,NULL,'fundraiser_child',0.6),
+ ('candy bar',0,NULL,'fundraiser_child',0.6),
+ ('raffle tickets',0,NULL,'fundraiser_child',0.5),
+ ('fundraiser',0,NULL,'fundraiser_child',0.5),
+ ('scout',0,NULL,'fundraiser_child',0.5),
+ ('cookies',0,NULL,'fundraiser_child',0.4),
+ ('wreath',0,NULL,'fundraiser_child',0.4),
+ ('school',0,NULL,'fundraiser_child',0.2);
+
+-- 4) Seed patterns for RELIGIOUS OUTREACH (neutral, behavior-focused)
+INSERT OR IGNORE INTO pattern_def (pattern, is_regex, entity_name, intent_name, weight) VALUES
+ ('missionary',0,NULL,'religious_outreach',1.0),
+ ('evangelist',0,NULL,'religious_outreach',0.8),
+ ('minister',0,NULL,'religious_outreach',0.8),
+ ('preacher',0,NULL,'religious_outreach',0.8),
+ ('share the good news',0,NULL,'religious_outreach',1.0),
+ ('talk about faith',0,NULL,'religious_outreach',0.9),
+ ('pray with you',0,NULL,'religious_outreach',0.8),
+ ('church literature',0,NULL,'religious_outreach',0.7),
+ ('pamphlet',0,NULL,'religious_outreach',0.7),
+ ('from the local church',0,NULL,'religious_outreach',0.8);

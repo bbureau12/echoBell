@@ -3,34 +3,65 @@ modes:
   quiet_hours: "22:00-07:00"
 
 rules:
+  # --- Packages ---
   - name: package_default
-    if: "intent=='package_drop'"
+    if: "intent == 'package_drop' and mode != 'SLEEPING'"
     then:
-      speak: "Thanks! You can leave it on the step."
+      speak: "Thanks! Please leave it on the step."
       notify: "summary"
       log: true
 
+  # --- Sales / solicitations ---
   - name: block_sales_when_busy
-    if: "intent=='sales_solicit' and mode in ['WORKING','SLEEPING']"
+    if: "intent == 'sales_solicit' and mode in ['WORKING','SLEEPING']"
     then:
-      speak: "Sorry, we don't accept solicitations. Please leave a card."
+      speak: "Thanks, but we don’t accept solicitations. Feel free to leave a pamphlet."
       notify: false
       log: true
 
+  # --- Neighbor help ---
   - name: neighbor_maybe_urgent
-    if: "intent=='neighbor_help'"
+    if: "intent == 'neighbor_help'"
     then:
       speak: "Hi! Is this urgent, or can it wait?"
       notify: "normal"
       log: true
 
+  # --- Authority / urgent ---
   - name: authority_always_priority
-    if: "intent=='authority_urgent' or uniform in ['police','fire']"
+    if: "intent == 'authority_urgent' or vision.uniform in ['police','fire']"
     then:
-      speak: "Hello—alerting the homeowner now."
+      speak: "This sounds urgent. Alerting now."
       notify: "priority"
       log: true
 
+  # --- Kids’ fundraisers (supportive) ---
+  - name: fundraiser_child_notify
+    if: "intent == 'fundraiser_child' and mode != 'SLEEPING'"
+    then:
+      speak: "That sounds great! One moment while I check my humans' availability. Please wait here."
+      notify: "priority"
+      log: true
+
+  # --- Religious outreach (friendly, firm) ---
+  - name: religious_outreach_friendly_decline
+    if: "intent == 'religious_outreach'"
+    then:
+      speak: "Thanks for visiting. I’m an AI and don’t have beliefs to change, but you may leave literature."
+      notify: "summary"
+      log: true
+
+  # --- Low-confidence backstop (Phase 2: LLM) ---
+  - name: low_conf_backstop
+    if: "context.get('intent_conf', 1.0) < 0.7"
+    then:
+      delegate: "astraea_core"          # or "llm_router" – your module name
+      fallback_speak: "One moment please."
+      notify: null
+      log: true
+
 fallback:
-  speak: "Sorry—could you repeat that?"
-  notify: "normal"
+  delegate: "astraea_core"          # or "llm_router" – your module name
+  fallback_speak: "One moment please."
+  notify: null
+  log: true
