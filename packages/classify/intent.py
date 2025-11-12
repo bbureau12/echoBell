@@ -1,44 +1,60 @@
 # packages/classify/intent.py
+from __future__ import annotations
 from dataclasses import dataclass
+from collections import defaultdict
 import sqlite3, re, os
+from typing import Dict, List, Tuple
 
-@dataclass
+@dataclass(slots=True)
 class Classified:
     intent: str
     conf: float
     urgency: int
 
-def _fetch_rules(conn):
+def _project_root() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+
+def _default_db_path() -> str:
+    return os.path.join(_project_root(), "data", "doorbell.db")
+
+def _fetch_rules(conn: sqlite3.Connection) -> Tuple[List[str], List[Tuple[str,int,str,str,float]], Dict[str, Tuple[str, float]]]:
+    # intents
     intents = [r[0] for r in conn.execute("SELECT name FROM intent_def").fetchall()]
+    # patterns: (pattern, is_regex, intent_name, entity_name, weight)
     patterns = conn.execute("""
-        SELECT pattern, is_regex, COALESCE(intent_name,'') AS intent_name,
-               COALESCE(entity_name,'') AS entity_name, weight
+        SELECT pattern, is_regex, COALESCE(intent_name,''), COALESCE(entity_name,''), weight
         FROM pattern_def
     """).fetchall()
-    entities = {(n or ''): (t or '', w or 0.5)
+    # entities: entity_name -> (tag, weight); tag is used as the *intent key* 1:1
+    entities = {(n or ''): (t or '', w if w is not None else 0.5)
                 for (n,t,w) in conn.execute("SELECT name, tag, weight FROM entity_def").fetchall()}
     return intents, patterns, entities
 
-def classify(text: str, vision, db_path=None) -> Classified:
-    if db_path is None:
-        # Get project root (three levels up from this file)
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-        db_path = os.path.join(project_root, "data", "doorbell.db")
-    
+def _confidence(raw: float) -> float:
+    # tweakable sigmoid-ish clamp
+    conf = 0.5 + 0.15 * raw
+    return max(0.4, min(0.95, conf))
+
+def classify(text: str, vision, db_path: str | None = None) -> Classified:
+    db_path = db_path or _default_db_path()
     t = (text or "").lower()
 
-    # Vision-first
-    if vision.package_box:
+    # Vision-first short-circuits
+    if getattr(vision, "package_box", False):
         return Classified("package_drop", 0.9, 10)
-    if vision.uniform in ("police","fire"):
+    if getattr(vision, "uniform", None) in {"police", "fire"}:
         return Classified("authority_urgent", 0.9, 90)
 
-    conn = sqlite3.connect(db_path)
-    intents, patterns, entities = _fetch_rules(conn)
-    scores = {i: 0.0 for i in intents}
+    with sqlite3.connect(db_path) as conn:
+        intents, patterns, entities = _fetch_rules(conn)
+
+    scores: Dict[str, float] = defaultdict(float)
+    for name in intents:
+        scores[name] = 0.0  # ensure all defined intents exist
 
     # Text pattern scoring
     for pattern, is_regex, intent_name, entity_name, weight in patterns:
+        # hit?
         hit = False
         if is_regex:
             if re.search(pattern, t, flags=re.IGNORECASE):
@@ -48,34 +64,34 @@ def classify(text: str, vision, db_path=None) -> Classified:
                 hit = True
         if not hit:
             continue
+
+        w = float(weight or 0.0)
+
+        # direct intent bump if present
         if intent_name:
-            scores[intent_name] = scores.get(intent_name, 0.0) + float(weight)
+            scores[intent_name] += w
+
+        # entity hint → add score to the tag-as-intent directly (1:1)
         if entity_name:
             tag, ew = entities.get(entity_name, ('', 0.0))
-            # Entity hint → add some score to typical intent buckets
-            if tag == 'utility':
-                scores['technician_visit'] = scores.get('technician_visit', 0.0) + ew
-            elif tag == 'delivery':
-                scores['package_drop'] = scores.get('package_drop', 0.0) + ew
-            elif tag == 'authority':
-                scores['authority_urgent'] = scores.get('authority_urgent', 0.0) + ew
-            elif tag == 'neighbor':
-                scores['neighbor_help'] = scores.get('neighbor_help', 0.0) + ew
-            elif tag == 'sales':
-                scores['sales_solicit'] = scores.get('sales_solicit', 0.0) + ew
+            if tag:  # tag is already the canonical intent key
+                scores[tag] += float(ew or 0.0)
 
-    conn.close()
-
-    # Choose top intent
+    # choose top
     intent = max(scores, key=scores.get) if scores else "unknown"
     raw = scores.get(intent, 0.0)
-    # Convert score to a 0..1-ish confidence (tweakable)
-    conf = max(0.4, min(0.95, 0.5 + 0.15 * raw))
+
+    # confidence & unknown fallback
+    conf = _confidence(raw)
     if raw < 0.5:
         intent, conf = "unknown", 0.45
 
-    urgency = 10
-    if intent == "neighbor_help": urgency = 20
-    if intent == "technician_visit": urgency = 30
-    if intent == "authority_urgent": urgency = 90
+    # urgency mapping
+    urgency_map = {
+        "neighbor_help": 20,
+        "technician_visit": 30,
+        "authority_urgent": 90,
+    }
+    urgency = urgency_map.get(intent, 10)
+
     return Classified(intent, conf, urgency)

@@ -212,3 +212,9 @@ data/*.sqlite
 data/*.sqlite3
 data/*-wal
 data/*-shm
+data/*.png
+data/*.jpg
+data/*.jpeg
+
+# venv
+.venv-vision/
