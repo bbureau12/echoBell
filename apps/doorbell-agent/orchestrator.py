@@ -17,17 +17,17 @@ from storage.store import log_event
 # Get absolute paths for data files
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 DB = os.path.join(PROJECT_ROOT, "data", "doorbell.db")
-RTSP = "rtsp://camera/stream"
+RTSP = os.path.join(PROJECT_ROOT, "data", "sherriff.jpg")
 MODE = "WORKING"  # later: read from DB
 
 def handle_ring():
     policies = load_policies()
     # OBSERVE
-    vision = snapshot_and_detect(RTSP)
+    vision = snapshot_and_detect(DB, RTSP)
     log_event(DB, etype="motion", mode=MODE, snapshot=vision.snapshot_path)
 
     # GREET
-    greet = "Hi, I’m Echo-Bell. I keep an eye on things here."
+    greet = "Hi, I’m Echo-Bell. I keep an eye on things here.  How can I help?"
     speak(greet)
 
     # LISTEN

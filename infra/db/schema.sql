@@ -76,7 +76,13 @@ CREATE TABLE IF NOT EXISTS notifiers (
   target TEXT NOT NULL,                       -- chat id / phone / URL
   priority TEXT DEFAULT 'normal'              -- summary|normal|priority
 );
-
+CREATE TABLE IF NOT EXISTS vision_class_map (
+    id              INTEGER PRIMARY KEY,
+    model_name      TEXT NOT NULL,          -- e.g. "yolov8n"
+    raw_class       TEXT NOT NULL,          -- "person", "tie", "microwave"
+    semantic_class  TEXT NOT NULL,          -- "person", "package", "dog", "vehicle", "tie", etc.
+    enabled         INTEGER NOT NULL DEFAULT 1
+);
 -- =========================
 -- Seed data (idempotent)
 -- =========================

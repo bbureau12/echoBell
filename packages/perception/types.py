@@ -9,6 +9,7 @@ class Detection:
     cls: str
     conf: float
     box: BBox
+    color: str | None = None
 
 @dataclass(slots=True)
 class VisionResult:

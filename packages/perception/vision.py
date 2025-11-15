@@ -1,22 +1,41 @@
 # packages/perception/vision.py
+import sqlite3
 import os, time
 from typing import List
+import numpy as np
 from ultralytics import YOLO
 import cv2
+import sys, os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from .types import Detection, VisionResult
 
 # choose a small model for latency; you can swap to 'yolov11s.pt' later
-_MODEL = YOLO(os.environ.get("ECHO_YOLO_MODEL", "yolov11n.pt"))
-
+_MODEL = YOLO("yolov8n.pt")  
+MODEL_NAME = "yolov8n"
 # Map model classes → our semantic buckets
 POSITIVE_CLASSES = {
     "person": "person",
-    "box": "package",
+    "microwave": "package",
+    "oven": "package",
     "suitcase": "package",
     "truck": "vehicle",
     "car": "vehicle",
     "motorbike": "vehicle",
     "dog": "dog",
+    "tie":"tie",
+}
+
+CSS_COLORS = {
+    "black":  (0, 0, 0),
+    "white":  (255, 255, 255),
+    "gray":   (128, 128, 128),
+    "red":    (200, 40, 40),
+    "green":  (40, 160, 40),
+    "blue":   (40, 80, 200),
+    "yellow": (220, 220, 40),
+    "orange": (230, 140, 40),
+    "brown":  (140, 90, 40),
+    "tan":    (210, 180, 140),
 }
 
 def _derive_flags(labels: List[str]) -> dict:
@@ -27,47 +46,123 @@ def _derive_flags(labels: List[str]) -> dict:
         "dog_present": any(l == "dog" for l in labels),
         "uniform": None,  # placeholder; see note below
     }
+def _fetch_vision_map(conn, model_name: str) -> dict[str, str]:
+    rows = conn.execute(
+        "SELECT raw_class, semantic_class FROM vision_class_map WHERE enabled=1 AND model_name=?",
+        (model_name,),
+    ).fetchall()
+    return {raw: sem for (raw, sem) in rows}
 
-def snapshot_and_detect(rtsp: str) -> VisionResult:
+def _dominant_color_rgb(crop: np.ndarray, k: int = 3) -> np.ndarray:
+    """Return dominant color in RGB as a float np.array([R,G,B])."""
+    if crop is None or crop.size == 0:
+        return np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+    pixels = crop.reshape(-1, 3).astype(np.float32)
+
+    # K-means on a subsample for speed if needed
+    if pixels.shape[0] > 5000:
+        idx = np.random.choice(pixels.shape[0], 5000, replace=False)
+        pixels = pixels[idx]
+
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+    _ret, labels, centers = cv2.kmeans(
+        pixels, k, None, criteria, 5, cv2.KMEANS_RANDOM_CENTERS
+    )
+    counts = np.bincount(labels.flatten())
+    dom_bgr = centers[np.argmax(counts)]  # [B,G,R]
+    dom_rgb = dom_bgr[::-1]              # [R,G,B]
+    return dom_rgb
+
+def _closest_color_name(rgb: np.ndarray) -> str:
+    r, g, b = rgb
+    best_name, best_dist = "unknown", float("inf")
+    for name, (cr, cg, cb) in CSS_COLORS.items():
+        dist = (cr - r) ** 2 + (cg - g) ** 2 + (cb - b) ** 2
+        if dist < best_dist:
+            best_name, best_dist = name, dist
+    return best_name
+
+
+def snapshot_and_detect(db: str, rtsp: str, debug: bool = True) -> VisionResult:
     import cv2, time
-    from .types import Detection, VisionResult
+    from packages.perception.types import Detection, VisionResult  # absolute import avoids relative issue
 
-    # 🟩 Option A — feed a still photo instead of using the camera
-    if rtsp.endswith(".jpg") or rtsp.endswith(".png"):
+    # Feed still photo if path ends with image extension; else RTSP frame
+    if rtsp.lower().endswith((".jpg", ".jpeg", ".png")):
         frame = cv2.imread(rtsp)
         if frame is None:
             raise RuntimeError(f"Failed to read test image: {rtsp}")
-        snap_path = rtsp  # already on disk, no need to save again
-
+        snap_path = rtsp
     else:
-        # 🟦 Option B — grab a frame from a live camera (your original code)
         cap = cv2.VideoCapture(rtsp)
         ok, frame = cap.read()
         cap.release()
         if not ok:
             raise RuntimeError("Failed to read from camera")
-
         ts = int(time.time())
         snap_path = f"/tmp/echo_snap_{ts}.jpg"
         cv2.imwrite(snap_path, frame)
 
-    # Run detector (unchanged)
+    # Run YOLO
     res = _MODEL(frame, imgsz=640, conf=0.25, iou=0.45, verbose=False)[0]
+    with sqlite3.connect(db) as conn:
+        positive_classes = _fetch_vision_map(conn, MODEL_NAME)
+        if len(positive_classes) == 0:
+            positive_classes = POSITIVE_CLASSES
+    # --- DEBUG: print ALL raw detections before any mapping ---
+    if debug:
+        print("\n[YOLO RAW DETECTIONS]")
+        for box, cls_i, score in zip(res.boxes.xyxy.cpu().numpy(),
+                                     res.boxes.cls.cpu().numpy(),
+                                     res.boxes.conf.cpu().numpy()):
+            name = res.names[int(cls_i)]
+            x1, y1, x2, y2 = [int(v) for v in box.tolist()]
+            print(f"{name:>14}  conf={float(score):.3f}  box=({x1},{y1},{x2},{y2})")
+        # Save an annotated debug image
+        try:
+            annotated = res.plot()  # returns a numpy image with boxes/labels drawn
+            dbg_path = snap_path.rsplit(".", 1)[0] + "_annotated.jpg"
+            cv2.imwrite(dbg_path, annotated)
+            print(f"[YOLO] Wrote annotated image → {dbg_path}")
+        except Exception as e:
+            print("[YOLO] Could not write annotated image:", e)
 
+    # Build detections with your mapping (note: COCO lacks 'box'/'package')
     dets: list[Detection] = []
-    # ... continue building dets and Vis
-    labels_for_flags: List[str] = []
+    labels_for_flags: list[str] = []
+    h, w = frame.shape[:2]
 
-    for b, c, conf in zip(res.boxes.xyxy.cpu().numpy(),
-                          res.boxes.cls.cpu().numpy(),
-                          res.boxes.conf.cpu().numpy()):
+    for b, c, score in zip(res.boxes.xyxy.cpu().numpy(),
+                            res.boxes.cls.cpu().numpy(),
+                            res.boxes.conf.cpu().numpy()):
         cls_name = res.names[int(c)]
-        # collapse to our buckets
-        mapped = POSITIVE_CLASSES.get(cls_name)
+
+        mapped = positive_classes.get(cls_name)  # your collapse map
         if not mapped:
             continue
         x1, y1, x2, y2 = map(int, b.tolist())
-        dets.append(Detection(cls=mapped, conf=float(conf), box=(x1,y1,x2,y2)))
+        # safety clamp
+        x1 = max(0, min(x1, w - 1))
+        x2 = max(0, min(x2, w))
+        y1 = max(0, min(y1, h - 1))
+        y2 = max(0, min(y2, h))
+
+        crop = frame[y1:y2, x1:x2]  # BGR
+        dom_rgb = _dominant_color_rgb(crop)
+        color_name = _closest_color_name(dom_rgb)
+
+        if debug:
+            print(f"  -> mapped={mapped}, color={color_name}, rgb={dom_rgb.astype(int).tolist()}")
+
+        dets.append(
+            Detection(
+                cls=mapped,
+                conf=float(score),
+                box=(x1, y1, x2, y2),
+                color=color_name,
+            )
+        )
         labels_for_flags.append(mapped)
 
     flags = _derive_flags(labels_for_flags)
