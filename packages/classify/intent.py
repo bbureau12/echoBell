@@ -39,12 +39,23 @@ def classify(text: str, vision, db_path: str | None = None) -> Classified:
     db_path = db_path or _default_db_path()
     t = (text or "").lower()
 
-    # Vision-first short-circuits
+    # 1) Vision-first override (data-driven via vision_rule)
+    # VisionResult should be populated by vision.snapshot_and_detect()
+    # with optional fields: vision_intent, vision_conf, vision_urgency.
+    v_intent = getattr(vision, "vision_intent", None)
+    if v_intent:
+        v_conf = float(getattr(vision, "vision_conf", 0.9))
+        v_urg = int(getattr(vision, "vision_urgency", 10))
+        return Classified(v_intent, v_conf, v_urg)
+
+    # (optional) 1b) Legacy hard-coded fallbacks if you want to keep them
+    # around while you migrate rules into the vision_rule table:
     if getattr(vision, "package_box", False):
         return Classified("package_drop", 0.9, 10)
     if getattr(vision, "uniform", None) in {"police", "fire"}:
         return Classified("authority_urgent", 0.9, 90)
 
+    # 2) Text-based classification (pattern_def / intent_def)
     with sqlite3.connect(db_path) as conn:
         intents, patterns, entities = _fetch_rules(conn)
 
@@ -54,7 +65,6 @@ def classify(text: str, vision, db_path: str | None = None) -> Classified:
 
     # Text pattern scoring
     for pattern, is_regex, intent_name, entity_name, weight in patterns:
-        # hit?
         hit = False
         if is_regex:
             if re.search(pattern, t, flags=re.IGNORECASE):
@@ -86,7 +96,7 @@ def classify(text: str, vision, db_path: str | None = None) -> Classified:
     if raw < 0.5:
         intent, conf = "unknown", 0.45
 
-    # urgency mapping
+    # urgency mapping (still hard-coded for now; can be moved into intent_def later)
     urgency_map = {
         "neighbor_help": 20,
         "technician_visit": 30,

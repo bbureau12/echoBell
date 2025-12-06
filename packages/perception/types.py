@@ -1,23 +1,24 @@
-# packages/perception/types.py
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from typing import List, Tuple, Optional
 
-BBox = Tuple[int, int, int, int]  # x1,y1,x2,y2
-
-@dataclass(slots=True)
+@dataclass
 class Detection:
     cls: str
     conf: float
-    box: BBox
-    color: str | None = None
+    box: Tuple[int, int, int, int]
+    color: str
 
-@dataclass(slots=True)
+@dataclass
 class VisionResult:
     snapshot_path: str
     detections: List[Detection]
-    # Derived features for orchestrator/classifier:
     person_present: bool
     package_box: bool
     vehicle_present: bool
     dog_present: bool
-    uniform: Optional[str] = None  # "police"|"fire"|None
+    uniform: Optional[str] = None
+
+    # new, all optional
+    vision_intent: Optional[str] = None
+    vision_conf: Optional[float] = None
+    vision_urgency: Optional[int] = None

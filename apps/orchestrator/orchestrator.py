@@ -7,10 +7,18 @@ import time
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, project_root)
 
-# Import Event class directly (avoid relative import issues when running as script)
+# Import Event class and EventBus
 sys.path.append(os.path.dirname(__file__))
 import event
-Event = event.Event
+from event import Event
+
+# Import EventBus using importlib to handle the hyphenated filename
+import importlib.util
+event_bus_path = os.path.join(os.path.dirname(__file__), "event-bus.py")
+spec = importlib.util.spec_from_file_location("event_bus", event_bus_path)
+event_bus_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(event_bus_module)
+EventBus = event_bus_module.EventBus
 
 # Import handle_ring from the doorbell-agent directory
 import importlib.util
@@ -23,68 +31,13 @@ handle_ring = doorbell_module.handle_ring
 # Import vision detection for driveway monitoring
 from packages.perception.vision import snapshot_and_detect
 
-# Create camera loop function (adapted from camera-agent/loop.py)
-def camera_loop(rtsp: str, bus, poll_sec: float = 1.0):
-    """Monitor driveway for approaching vehicles/people"""
-    seen_since = None
-    last_present = False
-    
-    # Use test image if RTSP fails
-    test_image = os.path.join(project_root, "data", "sherriff.jpg")
+# Import camera loop from camera-agent
+camera_loop_path = os.path.join(project_root, 'apps', 'camera-agent', 'loop.py')
+spec = importlib.util.spec_from_file_location("camera_loop_module", camera_loop_path)
+camera_loop_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(camera_loop_module)
+driveway_loop = camera_loop_module.driveway_loop
 
-    while True:
-        try:
-            # Use a default database path for vision
-            db_path = os.path.join(project_root, "data", "doorbell.db")
-            
-            # Try RTSP first, fall back to test image
-            try:
-                vision = snapshot_and_detect(db_path, rtsp, debug=False)
-            except RuntimeError:
-                # RTSP failed, use test image instead
-                vision = snapshot_and_detect(db_path, test_image, debug=False)
-
-            moving_thing = vision.person_present or vision.vehicle_present
-            now = time.time()
-
-            if moving_thing:
-                if not last_present:
-                    seen_since = now
-                last_present = True
-
-                if now - seen_since > 3.0:  # in frame for >3s
-                    kind = "person" if vision.person_present else "vehicle"
-                    event = Event(
-                        source="driveway",
-                        type="approach",
-                        kind=kind,
-                        snapshot=vision.snapshot_path
-                    )
-                    bus.publish(event)
-                    print(f"[Camera] {kind} detected approaching")
-                    # debounce a bit
-                    seen_since = now + 5.0
-            else:
-                last_present = False
-                seen_since = None
-
-        except Exception as e:
-            print(f"[Camera] Error in camera loop: {e}")
-
-        time.sleep(poll_sec)
-
-# Simple EventBus implementation since event-bus.py might have issues
-class EventBus:
-    def __init__(self):
-        self.events = []
-        
-    def publish(self, event):
-        self.events.append(event)
-        
-    def subscribe(self):
-        while not self.events:
-            time.sleep(0.1)  # Simple polling
-        return self.events.pop(0)
 
 # Simplified doorbell simulation
 def simulate_doorbell(bus):
@@ -98,7 +51,7 @@ def bell_orchestrator():
 
     # Start Camera 1 thread
     threading.Thread(
-        target=camera_loop,
+        target=driveway_loop,
         args=("rtsp://driveway", bus),
         daemon=True
     ).start()

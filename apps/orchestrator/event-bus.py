@@ -1,5 +1,5 @@
 from queue import Queue
-from .events import Event
+from event import Event
 
 class EventBus:
     def __init__(self):

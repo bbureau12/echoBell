@@ -106,73 +106,136 @@ def snapshot_and_detect(db: str, rtsp: str, debug: bool = True) -> VisionResult:
 
     # Run YOLO
     res = _MODEL(frame, imgsz=640, conf=0.25, iou=0.45, verbose=False)[0]
+
+    h, w = frame.shape[:2]
+
     with sqlite3.connect(db) as conn:
+        # 1) class mapping
         positive_classes = _fetch_vision_map(conn, MODEL_NAME)
         if len(positive_classes) == 0:
             positive_classes = POSITIVE_CLASSES
-    # --- DEBUG: print ALL raw detections before any mapping ---
-    if debug:
-        print("\n[YOLO RAW DETECTIONS]")
-        for box, cls_i, score in zip(res.boxes.xyxy.cpu().numpy(),
-                                     res.boxes.cls.cpu().numpy(),
-                                     res.boxes.conf.cpu().numpy()):
-            name = res.names[int(cls_i)]
-            x1, y1, x2, y2 = [int(v) for v in box.tolist()]
-            print(f"{name:>14}  conf={float(score):.3f}  box=({x1},{y1},{x2},{y2})")
-        # Save an annotated debug image
-        try:
-            annotated = res.plot()  # returns a numpy image with boxes/labels drawn
-            dbg_path = snap_path.rsplit(".", 1)[0] + "_annotated.jpg"
-            cv2.imwrite(dbg_path, annotated)
-            print(f"[YOLO] Wrote annotated image → {dbg_path}")
-        except Exception as e:
-            print("[YOLO] Could not write annotated image:", e)
 
-    # Build detections with your mapping (note: COCO lacks 'box'/'package')
-    dets: list[Detection] = []
-    labels_for_flags: list[str] = []
-    h, w = frame.shape[:2]
-
-    for b, c, score in zip(res.boxes.xyxy.cpu().numpy(),
-                            res.boxes.cls.cpu().numpy(),
-                            res.boxes.conf.cpu().numpy()):
-        cls_name = res.names[int(c)]
-
-        mapped = positive_classes.get(cls_name)  # your collapse map
-        if not mapped:
-            continue
-        x1, y1, x2, y2 = map(int, b.tolist())
-        # safety clamp
-        x1 = max(0, min(x1, w - 1))
-        x2 = max(0, min(x2, w))
-        y1 = max(0, min(y1, h - 1))
-        y2 = max(0, min(y2, h))
-
-        crop = frame[y1:y2, x1:x2]  # BGR
-        dom_rgb = _dominant_color_rgb(crop)
-        color_name = _closest_color_name(dom_rgb)
-
+        # --- DEBUG: print ALL raw detections before any mapping ---
         if debug:
-            print(f"  -> mapped={mapped}, color={color_name}, rgb={dom_rgb.astype(int).tolist()}")
+            print("\n[YOLO RAW DETECTIONS]")
+            for box, cls_i, score in zip(res.boxes.xyxy.cpu().numpy(),
+                                         res.boxes.cls.cpu().numpy(),
+                                         res.boxes.conf.cpu().numpy()):
+                name = res.names[int(cls_i)]
+                x1, y1, x2, y2 = [int(v) for v in box.tolist()]
+                print(f"{name:>14}  conf={float(score):.3f}  box=({x1},{y1},{x2},{y2})")
+            # Save an annotated debug image
+            try:
+                annotated = res.plot()  # returns a numpy image with boxes/labels drawn
+                dbg_path = snap_path.rsplit(".", 1)[0] + "_annotated.jpg"
+                cv2.imwrite(dbg_path, annotated)
+                print(f"[YOLO] Wrote annotated image → {dbg_path}")
+            except Exception as e:
+                print("[YOLO] Could not write annotated image:", e)
 
-        dets.append(
-            Detection(
-                cls=mapped,
-                conf=float(score),
-                box=(x1, y1, x2, y2),
-                color=color_name,
+        # 2) Build detections with your mapping
+        dets: list[Detection] = []
+        labels_for_flags: list[str] = []
+
+        for b, c, score in zip(res.boxes.xyxy.cpu().numpy(),
+                               res.boxes.cls.cpu().numpy(),
+                               res.boxes.conf.cpu().numpy()):
+            cls_name = res.names[int(c)]
+            mapped = positive_classes.get(cls_name)
+            if not mapped:
+                continue
+
+            x1, y1, x2, y2 = map(int, b.tolist())
+            # safety clamp
+            x1 = max(0, min(x1, w - 1))
+            x2 = max(0, min(x2, w))
+            y1 = max(0, min(y1, h - 1))
+            y2 = max(0, min(y2, h))
+
+            crop = frame[y1:y2, x1:x2]  # BGR
+            dom_rgb = _dominant_color_rgb(crop)
+            color_name = _closest_color_name(dom_rgb)
+
+            if debug:
+                print(f"  -> mapped={mapped}, color={color_name}, rgb={dom_rgb.astype(int).tolist()}")
+
+            dets.append(
+                Detection(
+                    cls=mapped,
+                    conf=float(score),
+                    box=(x1, y1, x2, y2),
+                    color=color_name,
+                )
             )
+            labels_for_flags.append(mapped)
+
+        flags = _derive_flags(labels_for_flags)
+
+        vr = VisionResult(
+            snapshot_path=snap_path,
+            detections=dets,
+            person_present=flags["person_present"],
+            package_box=flags["package_box"],
+            vehicle_present=flags["vehicle_present"],
+            dog_present=flags["dog_present"],
+            uniform=flags["uniform"],
         )
-        labels_for_flags.append(mapped)
 
-    flags = _derive_flags(labels_for_flags)
+        # 3) Apply DB-driven vision rules
+        intent, iconf, iurg = _apply_vision_rules(conn, vr)
+        if intent is not None:
+            vr.vision_intent = intent
+            vr.vision_conf = iconf
+            vr.vision_urgency = iurg
 
-    return VisionResult(
-        snapshot_path=snap_path,
-        detections=dets,
-        person_present=flags["person_present"],
-        package_box=flags["package_box"],
-        vehicle_present=flags["vehicle_present"],
-        dog_present=flags["dog_present"],
-        uniform=flags["uniform"],
-    )
+    return vr
+
+
+def _apply_vision_rules(conn: sqlite3.Connection, vr: VisionResult):
+    """
+    Look up vision_rule rows and see if any match this VisionResult.
+    Returns (intent, conf, urgency) or (None, None, None).
+    """
+    rows = conn.execute("""
+        SELECT condition_type, attribute, value, intent_name, conf, urgency
+        FROM vision_rule
+        ORDER BY id
+    """).fetchall()
+
+    for condition_type, attribute, value, intent_name, conf, urgency in rows:
+        expected = (value or "").lower()
+        matched = False
+
+        # Attribute on VisionResult flags, e.g. person_present, package_box, uniform
+        if condition_type == "flag_true":
+            actual = getattr(vr, attribute, False)
+            matched = bool(actual)
+
+        elif condition_type == "flag_equals":
+            actual = getattr(vr, attribute, None)
+            if actual is not None:
+                matched = str(actual).lower() == expected
+
+        # Any detection whose .color matches
+        elif condition_type == "color_equals":
+            matched = any(
+                (det.color or "").lower() == expected
+                for det in vr.detections
+            )
+
+        # Any detection whose .cls (semantic class) matches
+        elif condition_type == "class_equals":
+            matched = any(
+                (det.cls or "").lower() == expected
+                for det in vr.detections
+            )
+
+        # You can add more condition types later (e.g. 'dog_present', 'count_gt', etc.)
+
+        if matched:
+            # normalize defaults
+            c = float(conf if conf is not None else 0.9)
+            u = int(urgency if urgency is not None else 10)
+            return intent_name, c, u
+
+    return None, None, None
