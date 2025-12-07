@@ -190,7 +190,6 @@ def snapshot_and_detect(db: str, rtsp: str, debug: bool = True) -> VisionResult:
 
     return vr
 
-
 def _apply_vision_rules(conn: sqlite3.Connection, vr: VisionResult):
     """
     Look up vision_rule rows and see if any match this VisionResult.
