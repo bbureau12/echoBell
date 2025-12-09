@@ -215,6 +215,7 @@ data/*-shm
 data/*.png
 data/*.jpg
 data/*.jpeg
+data/*
 
 # venv
 .venv-vision/
