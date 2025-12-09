@@ -8,6 +8,7 @@ import cv2
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from .types import Detection, VisionResult
+from .ocr import extract_ocr_tokens
 
 # choose a small model for latency; you can swap to 'yolov11s.pt' later
 _MODEL = YOLO("yolov8n.pt")  
@@ -83,8 +84,7 @@ def _closest_color_name(rgb: np.ndarray) -> str:
             best_name, best_dist = name, dist
     return best_name
 
-
-def snapshot_and_detect(db: str, rtsp: str, debug: bool = True) -> VisionResult:
+def snapshot_and_detect(db: str, rtsp: str, debug: bool = True, enable_ocr: bool = True) -> VisionResult:
     import cv2, time
     from packages.perception.types import Detection, VisionResult  # absolute import avoids relative issue
 
@@ -181,6 +181,12 @@ def snapshot_and_detect(db: str, rtsp: str, debug: bool = True) -> VisionResult:
             uniform=flags["uniform"],
         )
 
+        if enable_ocr and dets:
+            tokens = extract_ocr_tokens(frame, dets)
+            vr.ocr_tokens = tokens
+            vr.ocr_raw = " ".join(tokens) if tokens else None
+            _apply_ocr_rules(conn, vr)
+
         # 3) Apply DB-driven vision rules
         intent, iconf, iurg = _apply_vision_rules(conn, vr)
         if intent is not None:
@@ -236,5 +242,23 @@ def _apply_vision_rules(conn: sqlite3.Connection, vr: VisionResult):
             c = float(conf if conf is not None else 0.9)
             u = int(urgency if urgency is not None else 10)
             return intent_name, c, u
+
+    return None, None, None
+
+def _apply_ocr_rules(conn, vr):
+    if not vr.ocr_tokens:
+        return None, None, None
+
+    tokens = [t.lower() for t in vr.ocr_tokens]
+
+    rows = conn.execute("""
+        SELECT token, intent_name, conf, urgency
+        FROM ocr_rule
+        WHERE enabled = 1
+    """).fetchall()
+
+    for token, intent_name, conf, urg in rows:
+        if token.lower() in tokens:
+            return intent_name, conf or 0.9, urg or 10
 
     return None, None, None

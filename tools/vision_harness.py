@@ -2,6 +2,7 @@ import os
 import sys
 import sqlite3
 import argparse
+import glob
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -12,6 +13,28 @@ from packages.classify.intent import classify
 
 
 VALID_EXT = (".jpg", ".jpeg", ".png")
+
+
+def cleanup_annotated_files(data_root: str):
+    """
+    Delete all files with 'annotated' in the filename from data folder and subfolders.
+    """
+    deleted_count = 0
+    pattern = os.path.join(data_root, "**", "*annotated*")
+    
+    for file_path in glob.glob(pattern, recursive=True):
+        if os.path.isfile(file_path):
+            try:
+                os.remove(file_path)
+                print(f"[CLEANUP] Deleted: {file_path}")
+                deleted_count += 1
+            except Exception as e:
+                print(f"[CLEANUP] Failed to delete {file_path}: {e}")
+    
+    if deleted_count > 0:
+        print(f"[CLEANUP] Removed {deleted_count} annotated file(s)\n")
+    else:
+        print("[CLEANUP] No annotated files found\n")
 
 
 def walk_dataset(root: str):
@@ -40,6 +63,9 @@ def format_detection(det):
 def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
     print(f"\n[DATASET] scanning: {dataset_root}")
     print(f"[DATASET] using DB: {db_path}\n")
+    
+    # Clean up any annotated files before running tests
+    cleanup_annotated_files(dataset_root)
 
     results = []
 
@@ -72,6 +98,11 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
         print(f"  intent  = {classified.intent}")
         print(f"  conf    = {classified.conf:.2f}")
         print(f"  urgency = {classified.urgency}")
+        if (vr.ocr_raw):
+            print("\nOCR tokens:")
+            print(f"  raw: {vr.ocr_raw}")
+        else:
+            print("\nOCR tokens: (none)")
 
         print()
 
