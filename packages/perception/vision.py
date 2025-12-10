@@ -7,7 +7,7 @@ from ultralytics import YOLO
 import cv2
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-from .types import Detection, VisionResult
+from .types import Detection, Evidence, VisionResult
 from .ocr import extract_ocr_tokens
 
 # choose a small model for latency; you can swap to 'yolov11s.pt' later
@@ -106,7 +106,6 @@ def snapshot_and_detect(db: str, rtsp: str, debug: bool = True, enable_ocr: bool
 
     # Run YOLO
     res = _MODEL(frame, imgsz=640, conf=0.25, iou=0.45, verbose=False)[0]
-
     h, w = frame.shape[:2]
 
     with sqlite3.connect(db) as conn:
@@ -118,9 +117,11 @@ def snapshot_and_detect(db: str, rtsp: str, debug: bool = True, enable_ocr: bool
         # --- DEBUG: print ALL raw detections before any mapping ---
         if debug:
             print("\n[YOLO RAW DETECTIONS]")
-            for box, cls_i, score in zip(res.boxes.xyxy.cpu().numpy(),
-                                         res.boxes.cls.cpu().numpy(),
-                                         res.boxes.conf.cpu().numpy()):
+            for box, cls_i, score in zip(
+                res.boxes.xyxy.cpu().numpy(),
+                res.boxes.cls.cpu().numpy(),
+                res.boxes.conf.cpu().numpy()
+            ):
                 name = res.names[int(cls_i)]
                 x1, y1, x2, y2 = [int(v) for v in box.tolist()]
                 print(f"{name:>14}  conf={float(score):.3f}  box=({x1},{y1},{x2},{y2})")
@@ -137,9 +138,11 @@ def snapshot_and_detect(db: str, rtsp: str, debug: bool = True, enable_ocr: bool
         dets: list[Detection] = []
         labels_for_flags: list[str] = []
 
-        for b, c, score in zip(res.boxes.xyxy.cpu().numpy(),
-                               res.boxes.cls.cpu().numpy(),
-                               res.boxes.conf.cpu().numpy()):
+        for b, c, score in zip(
+            res.boxes.xyxy.cpu().numpy(),
+            res.boxes.cls.cpu().numpy(),
+            res.boxes.conf.cpu().numpy()
+        ):
             cls_name = res.names[int(c)]
             mapped = positive_classes.get(cls_name)
             if not mapped:
@@ -181,84 +184,28 @@ def snapshot_and_detect(db: str, rtsp: str, debug: bool = True, enable_ocr: bool
             uniform=flags["uniform"],
         )
 
+        # Emit flag evidence
+        if flags["person_present"]:
+            vr.evidence.append(Evidence("vision", "person_present", "true", 0.9))
+        if flags["package_box"]:
+            vr.evidence.append(Evidence("vision", "package_box", "true", 0.9))
+        if flags["vehicle_present"]:
+            vr.evidence.append(Evidence("vision", "vehicle_present", "true", 0.9))
+        if flags["dog_present"]:
+            vr.evidence.append(Evidence("vision", "dog_present", "true", 0.9))
+
+        # Emit per-detection evidence
+        for det in dets:
+            vr.evidence.append(Evidence("vision", "class", det.cls, det.conf))
+            vr.evidence.append(Evidence("vision", "color", det.color, 0.6))
+
+        # OCR → evidence
         if enable_ocr and dets:
             tokens = extract_ocr_tokens(frame, dets)
             vr.ocr_tokens = tokens
             vr.ocr_raw = " ".join(tokens) if tokens else None
-            _apply_ocr_rules(conn, vr)
 
-        # 3) Apply DB-driven vision rules
-        intent, iconf, iurg = _apply_vision_rules(conn, vr)
-        if intent is not None:
-            vr.vision_intent = intent
-            vr.vision_conf = iconf
-            vr.vision_urgency = iurg
+            for tok in tokens:
+                vr.evidence.append(Evidence("ocr", "token", tok.lower(), 0.9))
 
     return vr
-
-def _apply_vision_rules(conn: sqlite3.Connection, vr: VisionResult):
-    """
-    Look up vision_rule rows and see if any match this VisionResult.
-    Returns (intent, conf, urgency) or (None, None, None).
-    """
-    rows = conn.execute("""
-        SELECT condition_type, attribute, value, intent_name, conf, urgency
-        FROM vision_rule
-        ORDER BY id
-    """).fetchall()
-
-    for condition_type, attribute, value, intent_name, conf, urgency in rows:
-        expected = (value or "").lower()
-        matched = False
-
-        # Attribute on VisionResult flags, e.g. person_present, package_box, uniform
-        if condition_type == "flag_true":
-            actual = getattr(vr, attribute, False)
-            matched = bool(actual)
-
-        elif condition_type == "flag_equals":
-            actual = getattr(vr, attribute, None)
-            if actual is not None:
-                matched = str(actual).lower() == expected
-
-        # Any detection whose .color matches
-        elif condition_type == "color_equals":
-            matched = any(
-                (det.color or "").lower() == expected
-                for det in vr.detections
-            )
-
-        # Any detection whose .cls (semantic class) matches
-        elif condition_type == "class_equals":
-            matched = any(
-                (det.cls or "").lower() == expected
-                for det in vr.detections
-            )
-
-        # You can add more condition types later (e.g. 'dog_present', 'count_gt', etc.)
-
-        if matched:
-            # normalize defaults
-            c = float(conf if conf is not None else 0.9)
-            u = int(urgency if urgency is not None else 10)
-            return intent_name, c, u
-
-    return None, None, None
-
-def _apply_ocr_rules(conn, vr):
-    if not vr.ocr_tokens:
-        return None, None, None
-
-    tokens = [t.lower() for t in vr.ocr_tokens]
-
-    rows = conn.execute("""
-        SELECT token, intent_name, conf, urgency
-        FROM ocr_rule
-        WHERE enabled = 1
-    """).fetchall()
-
-    for token, intent_name, conf, urg in rows:
-        if token.lower() in tokens:
-            return intent_name, conf or 0.9, urg or 10
-
-    return None, None, None

@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections import defaultdict
 import sqlite3, re, os
+import sys
 from typing import Dict, List, Tuple
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+from packages.perception.types import Evidence, VisionResult
 
 @dataclass(slots=True)
 class Classified:
@@ -35,73 +39,134 @@ def _confidence(raw: float) -> float:
     conf = 0.5 + 0.15 * raw
     return max(0.4, min(0.95, conf))
 
-def classify(text: str, vision, db_path: str | None = None) -> Classified:
+def classify(text: str, vision: VisionResult, db_path: str | None = None) -> Classified:
     db_path = db_path or _default_db_path()
     t = (text or "").lower()
 
-    # 1) Vision-first override (data-driven via vision_rule)
-    # VisionResult should be populated by vision.snapshot_and_detect()
-    # with optional fields: vision_intent, vision_conf, vision_urgency.
-    v_intent = getattr(vision, "vision_intent", None)
-    if v_intent:
-        v_conf = float(getattr(vision, "vision_conf", 0.9))
-        v_urg = int(getattr(vision, "vision_urgency", 10))
-        return Classified(v_intent, v_conf, v_urg)
-
-    # (optional) 1b) Legacy hard-coded fallbacks if you want to keep them
-    # around while you migrate rules into the vision_rule table:
-    if getattr(vision, "package_box", False):
-        return Classified("package_drop", 0.9, 10)
-    if getattr(vision, "uniform", None) in {"police", "fire"}:
-        return Classified("authority_urgent", 0.9, 90)
-
-    # 2) Text-based classification (pattern_def / intent_def)
-    with sqlite3.connect(db_path) as conn:
-        intents, patterns, entities = _fetch_rules(conn)
-
+    # Overall score + urgency accumulator
     scores: Dict[str, float] = defaultdict(float)
-    for name in intents:
-        scores[name] = 0.0  # ensure all defined intents exist
+    intent_urgencies: Dict[str, List[int]] = defaultdict(list)
 
-    # Text pattern scoring
-    for pattern, is_regex, intent_name, entity_name, weight in patterns:
-        hit = False
-        if is_regex:
-            if re.search(pattern, t, flags=re.IGNORECASE):
-                hit = True
-        else:
-            if pattern.lower() in t:
-                hit = True
-        if not hit:
-            continue
-
-        w = float(weight or 0.0)
-
-        # direct intent bump if present
-        if intent_name:
-            scores[intent_name] += w
-
-        # entity hint → add score to the tag-as-intent directly (1:1)
-        if entity_name:
-            tag, ew = entities.get(entity_name, ('', 0.0))
-            if tag:  # tag is already the canonical intent key
-                scores[tag] += float(ew or 0.0)
-
-    # choose top
-    intent = max(scores, key=scores.get) if scores else "unknown"
-    raw = scores.get(intent, 0.0)
-
-    # confidence & unknown fallback
-    conf = _confidence(raw)
-    if raw < 0.5:
-        intent, conf = "unknown", 0.45
-
-    # urgency mapping (still hard-coded for now; can be moved into intent_def later)
+    # Hard-coded urgency for text-only intents (you can move this into intent_def later)
     urgency_map = {
         "neighbor_help": 20,
         "technician_visit": 30,
         "authority_urgent": 90,
     }
-    urgency = urgency_map.get(intent, 10)
 
-    return Classified(intent, conf, urgency)
+    with sqlite3.connect(db_path) as conn:
+        # 1) TEXT: pattern/entity-based scoring → one vote
+        intents, patterns, entities = _fetch_rules(conn)
+
+        text_raw_scores: Dict[str, float] = defaultdict(float)
+        for name in intents:
+            text_raw_scores[name] = 0.0
+
+        for pattern, is_regex, intent_name, entity_name, weight in patterns:
+            hit = False
+            if is_regex:
+                if re.search(pattern, t, flags=re.IGNORECASE):
+                    hit = True
+            else:
+                if pattern.lower() in t:
+                    hit = True
+            if not hit:
+                continue
+
+            w = float(weight or 0.0)
+
+            # direct intent bump if present
+            if intent_name:
+                text_raw_scores[intent_name] += w
+
+            # entity hint → add score to the tag-as-intent directly (1:1)
+            if entity_name:
+                tag, ew = entities.get(entity_name, ('', 0.0))
+                if tag:
+                    text_raw_scores[tag] += float(ew or 0.0)
+
+        # fold best text intent into the unified scores
+        if text_raw_scores:
+            best_text_intent = max(text_raw_scores, key=text_raw_scores.get)
+            raw = text_raw_scores[best_text_intent]
+            if raw > 0.0:
+                text_conf = _confidence(raw)  # 0.4–0.95
+                scores[best_text_intent] += text_conf
+                intent_urgencies[best_text_intent].append(
+                    urgency_map.get(best_text_intent, 10)
+                )
+
+        # 2) PERCEPTION: apply signal_rule to vision.evidence (vision + OCR + future fashion)
+        sig_scores, sig_urgencies = _score_signal_rules(conn, vision)
+        for intent_name, s in sig_scores.items():
+            scores[intent_name] += s
+            intent_urgencies[intent_name].extend(sig_urgencies[intent_name])
+
+    # 3) Decide final intent from combined scores
+    if not scores:
+        return Classified("unknown", 0.45, 10)
+
+    best_intent = max(scores, key=scores.get)
+    total_score = scores[best_intent]
+
+    # map accumulated score into a confidence
+    # one strong signal ≈ ~0.7, multiple agreeing signals → closer to 0.9–0.95
+    conf = 0.5 + 0.25 * min(total_score, 2.0)
+    conf = max(0.4, min(0.95, conf))
+
+    urg_list = intent_urgencies.get(best_intent) or [10]
+    urgency = max(urg_list)
+
+    return Classified(best_intent, conf, urgency)
+
+
+def _score_signal_rules(conn: sqlite3.Connection, vision: VisionResult):
+    """
+    Apply signal_rule rows to the evidence in VisionResult.
+    Returns: (scores, urgencies)
+      scores:    dict[intent_name -> float]
+      urgencies: dict[intent_name -> list[int]]
+    """
+    evidence: list[Evidence] = getattr(vision, "evidence", []) or []
+
+    rows = conn.execute("""
+        SELECT source, feature, operator, value, intent_name,
+               weight, min_conf, urgency
+        FROM signal_rule
+        WHERE enabled = 1
+    """).fetchall()
+
+    scores: dict[str, float] = defaultdict(float)
+    urgencies: dict[str, list[int]] = defaultdict(list)
+
+    for ev in evidence:
+        ev_source = ev.source
+        ev_feature = ev.feature
+        ev_val = str(ev.value).lower()
+        ev_conf = float(ev.conf)
+
+        for source, feature, op, val, intent, weight, min_conf, urg in rows:
+            if source != ev_source or feature != ev_feature:
+                continue
+
+            min_c = float(min_conf or 0.0)
+            if ev_conf < min_c:
+                continue
+
+            rule_val = str(val).lower()
+            matched = False
+
+            if op == "equals":
+                matched = (ev_val == rule_val)
+            elif op == "contains":
+                matched = (rule_val in ev_val)
+            # you can add more ops later (gte, lte, etc.)
+
+            if not matched:
+                continue
+
+            w = float(weight or 1.0)
+            scores[intent] += w * ev_conf
+            urgencies[intent].append(int(urg or 10))
+
+    return scores, urgencies
