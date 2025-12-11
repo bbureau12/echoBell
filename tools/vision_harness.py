@@ -104,7 +104,12 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
         else:
             print("\nOCR tokens: (none)")
 
-        print()
+        print("\n--- TRACE ---")
+        if classified.trace:
+            for line in classified.trace:
+                print(line)
+
+                print()
 
         results.append((folder, file_path, vr, classified))
 
@@ -120,7 +125,7 @@ def main():
     )
     parser.add_argument(
         "--dataset",
-        default=os.path.join(ROOT, "data"),
+        default=os.path.join(ROOT, "data", "test"),
         help="Dataset root directory containing subfolders of images"
     )
     parser.add_argument(
