@@ -7,13 +7,12 @@ from ultralytics import YOLO
 import cv2
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-from .types import Detection, Evidence, VisionResult
+from packages.common.types import Detection, Evidence, VisionResult, SceneObject
 from .ocr import extract_ocr_tokens
 
-# choose a small model for latency; you can swap to 'yolov11s.pt' later
-_MODEL = YOLO("yolov8n.pt")  
+_MODEL = YOLO("yolov8n.pt")
 MODEL_NAME = "yolov8n"
-# Map model classes → our semantic buckets
+
 POSITIVE_CLASSES = {
     "person": "person",
     "microwave": "package",
@@ -23,7 +22,7 @@ POSITIVE_CLASSES = {
     "car": "vehicle",
     "motorbike": "vehicle",
     "dog": "dog",
-    "tie":"tie",
+    "tie": "tie",
 }
 
 CSS_COLORS = {
@@ -39,29 +38,32 @@ CSS_COLORS = {
     "tan":    (210, 180, 140),
 }
 
+
 def _derive_flags(labels: List[str]) -> dict:
     return {
         "person_present": any(l == "person" for l in labels),
         "package_box": any(l == "package" for l in labels),
         "vehicle_present": any(l == "vehicle" for l in labels),
         "dog_present": any(l == "dog" for l in labels),
-        "uniform": None,  # placeholder; see note below
+        "uniform": None,  # placeholder
     }
+
+
 def _fetch_vision_map(conn, model_name: str) -> dict[str, str]:
     rows = conn.execute(
-        "SELECT raw_class, semantic_class FROM vision_class_map WHERE enabled=1 AND model_name=?",
+        "SELECT raw_class, semantic_class FROM vision_class_map "
+        "WHERE enabled=1 AND model_name=?",
         (model_name,),
     ).fetchall()
     return {raw: sem for (raw, sem) in rows}
 
+
 def _dominant_color_rgb(crop: np.ndarray, k: int = 3) -> np.ndarray:
-    """Return dominant color in RGB as a float np.array([R,G,B])."""
     if crop is None or crop.size == 0:
         return np.array([0.0, 0.0, 0.0], dtype=np.float32)
 
     pixels = crop.reshape(-1, 3).astype(np.float32)
 
-    # K-means on a subsample for speed if needed
     if pixels.shape[0] > 5000:
         idx = np.random.choice(pixels.shape[0], 5000, replace=False)
         pixels = pixels[idx]
@@ -71,9 +73,10 @@ def _dominant_color_rgb(crop: np.ndarray, k: int = 3) -> np.ndarray:
         pixels, k, None, criteria, 5, cv2.KMEANS_RANDOM_CENTERS
     )
     counts = np.bincount(labels.flatten())
-    dom_bgr = centers[np.argmax(counts)]  # [B,G,R]
-    dom_rgb = dom_bgr[::-1]              # [R,G,B]
+    dom_bgr = centers[np.argmax(counts)]
+    dom_rgb = dom_bgr[::-1]
     return dom_rgb
+
 
 def _closest_color_name(rgb: np.ndarray) -> str:
     r, g, b = rgb
@@ -84,11 +87,14 @@ def _closest_color_name(rgb: np.ndarray) -> str:
             best_name, best_dist = name, dist
     return best_name
 
-def snapshot_and_detect(db: str, rtsp: str, debug: bool = True, enable_ocr: bool = True) -> VisionResult:
-    import cv2, time
-    from packages.perception.types import Detection, VisionResult  # absolute import avoids relative issue
 
-    # Feed still photo if path ends with image extension; else RTSP frame
+def snapshot_and_detect(db: str, rtsp: str,
+                        debug: bool = True,
+                        enable_ocr: bool = True) -> VisionResult:
+    import cv2, time
+    from packages.common.types import Detection, VisionResult
+
+    # 1) Grab frame or image
     if rtsp.lower().endswith((".jpg", ".jpeg", ".png")):
         frame = cv2.imread(rtsp)
         if frame is None:
@@ -104,44 +110,42 @@ def snapshot_and_detect(db: str, rtsp: str, debug: bool = True, enable_ocr: bool
         snap_path = f"/tmp/echo_snap_{ts}.jpg"
         cv2.imwrite(snap_path, frame)
 
-    # Run YOLO
+    # 2) YOLO
     res = _MODEL(frame, imgsz=640, conf=0.25, iou=0.45, verbose=False)[0]
     h, w = frame.shape[:2]
 
     with sqlite3.connect(db) as conn:
-        # 1) class mapping
         positive_classes = _fetch_vision_map(conn, MODEL_NAME)
-        if len(positive_classes) == 0:
+        if not positive_classes:
             positive_classes = POSITIVE_CLASSES
 
-        # --- DEBUG: print ALL raw detections before any mapping ---
+        # Debug raw detections
         if debug:
             print("\n[YOLO RAW DETECTIONS]")
             for box, cls_i, score in zip(
                 res.boxes.xyxy.cpu().numpy(),
                 res.boxes.cls.cpu().numpy(),
-                res.boxes.conf.cpu().numpy()
+                res.boxes.conf.cpu().numpy(),
             ):
                 name = res.names[int(cls_i)]
                 x1, y1, x2, y2 = [int(v) for v in box.tolist()]
                 print(f"{name:>14}  conf={float(score):.3f}  box=({x1},{y1},{x2},{y2})")
-            # Save an annotated debug image
             try:
-                annotated = res.plot()  # returns a numpy image with boxes/labels drawn
+                annotated = res.plot()
                 dbg_path = snap_path.rsplit(".", 1)[0] + "_annotated.jpg"
                 cv2.imwrite(dbg_path, annotated)
                 print(f"[YOLO] Wrote annotated image → {dbg_path}")
             except Exception as e:
                 print("[YOLO] Could not write annotated image:", e)
 
-        # 2) Build detections with your mapping
+        # 3) Build Detection list
         dets: list[Detection] = []
         labels_for_flags: list[str] = []
 
         for b, c, score in zip(
             res.boxes.xyxy.cpu().numpy(),
             res.boxes.cls.cpu().numpy(),
-            res.boxes.conf.cpu().numpy()
+            res.boxes.conf.cpu().numpy(),
         ):
             cls_name = res.names[int(c)]
             mapped = positive_classes.get(cls_name)
@@ -149,18 +153,20 @@ def snapshot_and_detect(db: str, rtsp: str, debug: bool = True, enable_ocr: bool
                 continue
 
             x1, y1, x2, y2 = map(int, b.tolist())
-            # safety clamp
             x1 = max(0, min(x1, w - 1))
             x2 = max(0, min(x2, w))
             y1 = max(0, min(y1, h - 1))
             y2 = max(0, min(y2, h))
 
-            crop = frame[y1:y2, x1:x2]  # BGR
+            crop = frame[y1:y2, x1:x2]
             dom_rgb = _dominant_color_rgb(crop)
             color_name = _closest_color_name(dom_rgb)
 
             if debug:
-                print(f"  -> mapped={mapped}, color={color_name}, rgb={dom_rgb.astype(int).tolist()}")
+                print(
+                    f"  -> mapped={mapped}, color={color_name}, "
+                    f"rgb={dom_rgb.astype(int).tolist()}"
+                )
 
             dets.append(
                 Detection(
@@ -184,7 +190,42 @@ def snapshot_and_detect(db: str, rtsp: str, debug: bool = True, enable_ocr: bool
             uniform=flags["uniform"],
         )
 
-        # Emit flag evidence
+        # 4) Build SceneObjects and object-level evidence
+        scene_objects: list[SceneObject] = []
+        for idx, det in enumerate(dets):
+            # rough entity hint
+            ent = det.cls if det.cls in ("person", "vehicle", "dog", "package") else None
+
+            obj = SceneObject(
+                object_id=idx,
+                label=det.cls,
+                parent_id=None,
+            )
+            obj.props["color"] = det.color
+
+            # evidence: class + color
+            obj.evidence.append(
+                Evidence(
+                    source="vision",
+                    feature="class",
+                    value=det.cls.lower(),
+                    conf=det.conf,
+                )
+            )
+            obj.evidence.append(
+                Evidence(
+                    source="vision",
+                    feature="color",
+                    value=det.color.lower(),
+                    conf=0.6,
+                )
+            )
+
+            scene_objects.append(obj)
+
+        vr.objects = scene_objects
+
+        # 5) Global flag evidence (scene-level)
         if flags["person_present"]:
             vr.evidence.append(Evidence("vision", "person_present", "true", 0.9))
         if flags["package_box"]:
@@ -194,18 +235,24 @@ def snapshot_and_detect(db: str, rtsp: str, debug: bool = True, enable_ocr: bool
         if flags["dog_present"]:
             vr.evidence.append(Evidence("vision", "dog_present", "true", 0.9))
 
-        # Emit per-detection evidence
-        for det in dets:
-            vr.evidence.append(Evidence("vision", "class", det.cls, det.conf))
-            vr.evidence.append(Evidence("vision", "color", det.color, 0.6))
+        # 6) Merge object evidence into scene-level evidence
+        for obj in scene_objects:
+            vr.evidence.extend(obj.evidence)
 
-        # OCR → evidence
+        # 7) OCR → evidence
         if enable_ocr and dets:
             tokens = extract_ocr_tokens(frame, dets)
             vr.ocr_tokens = tokens
             vr.ocr_raw = " ".join(tokens) if tokens else None
 
             for tok in tokens:
-                vr.evidence.append(Evidence("ocr", "token", tok.lower(), 0.9))
+                vr.evidence.append(
+                    Evidence(
+                        source="ocr",
+                        feature="token",
+                        value=tok.lower(),
+                        conf=0.9
+                    )
+                )
 
     return vr

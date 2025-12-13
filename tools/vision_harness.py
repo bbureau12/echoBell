@@ -87,11 +87,17 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
             for det in vr.detections:
                 print("  -", format_detection(det))
 
-        # 4) Print rule results
-        print("\nVision rule result:")
-        print(f"  vision_intent  = {vr.vision_intent}")
-        print(f"  vision_conf    = {vr.vision_conf}")
-        print(f"  vision_urgency = {vr.vision_urgency}")
+        # 4) Evidence summary (new world)
+        print("\nEvidence (scene-level):")
+        if not getattr(vr, "evidence", None):
+            print("  (none)")
+        else:
+            # print a few so output doesn't explode
+            for ev in vr.evidence[:30]:
+                oid = getattr(ev, "object_id", None)
+                print(f"  - src={ev.source} feat={ev.feature} val={ev.value} conf={ev.conf:.2f} obj={oid}")
+            if len(vr.evidence) > 30:
+                print(f"  ... ({len(vr.evidence) - 30} more)")
 
         # 5) Final classified intent
         print("\nClassified intent:")

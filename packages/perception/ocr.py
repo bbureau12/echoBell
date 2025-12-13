@@ -2,7 +2,7 @@
 import easyocr
 import numpy as np
 from typing import List
-from .types import Detection
+from packages.common.types import Detection
 
 _reader = None
 
