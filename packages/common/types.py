@@ -137,6 +137,127 @@ class Evidence:
 
     object_id: int | None = None
 
+@dataclass
+class SceneObject:
+    # ------------------------------------------------------------------
+    # object_id
+    # ------------------------------------------------------------------
+    # A unique identifier **within this single snapshot**.
+    #
+    # YOLO detections are enumerated in order and assigned IDs:
+    #    0 → first detected object
+    #    1 → second detected object
+    #    ...
+    #
+    # IMPORTANT:
+    #   - These IDs do NOT persist across events.
+    #   - They exist only to group evidence belonging to the
+    #     same object within a single perception pass.
+    #
+    # Example:
+    #   object_id = 0 → person
+    #   object_id = 1 → vehicle
+    object_id: int
+    # ------------------------------------------------------------------
+    # box
+    # ------------------------------------------------------------------
+    # Bounding box (x1, y1, x2, y2) in pixel coordinates.
+    # Useful for:
+    #   - cropping for OCR
+        #   - feeding into Fashion classifier
+    box: Tuple[int, int, int, int] | None = None
+
+    # ------------------------------------------------------------------
+    # parent_id
+    # ------------------------------------------------------------------
+    # Points to the ID of another SceneObject that is this object's parent.
+    #
+    # IMPORTANT:
+    #   - These IDs do NOT persist across events.
+    #   - They exist only to group evidence belonging to the
+    #     same object within a single perception pass.
+    #
+    # Example:
+    #   object_id = 1 → self (license plate)
+    #   parent_id = 1 → parent (vehicle)
+    parent_id: int | None = None
+
+    # ------------------------------------------------------------------
+    # label
+    # ------------------------------------------------------------------
+    # Semantic label describing what kind of object this is.
+    #
+    # Typically derived from YOLO's class mapping (vision), but can
+    # also come from other perception modules.
+    #
+    # Example labels:
+    #   - "person"
+    #   - "vehicle"
+    #   - "dog"
+    #   - "coat"
+    #   - "tie"
+    #   - "package"
+    #
+    # Used heavily by the rule engine to determine the behavior
+    # of an object in context.
+    label: str
+
+    # ------------------------------------------------------------------
+    # parent_id
+    # ------------------------------------------------------------------
+    # Optional link to another SceneObject, forming a hierarchy,
+    # also known as a *scene graph*.
+    #
+    # Useful for representing nested or attached objects:
+    #   person (object_id=0)
+    #     └─ coat (object_id=1)
+    #          └─ tie (object_id=2)
+    #
+    # If None:
+    #   - The object is a top-level item in the scene.
+    parent_id: int | None = None
+
+    # ------------------------------------------------------------------
+    # props
+    # ------------------------------------------------------------------
+    # A dictionary of **canonical flat properties** describing this object.
+    #
+    # These differ from raw Evidence:
+    #   - props represent *aggregated or interpreted facts*
+    #   - evidence represents *individual observed signals*
+    #
+    # Examples of props:
+    #   {
+    #       "color": "tan",
+    #       "age_group": "adult",
+    #       "vehicle_make": "ford",
+    #       "upper_body_color": "brown",
+    #       "has_badge": True
+    #   }
+    #
+    # Props are ideal for downstream rule evaluation or summary generation.
+    props: dict = field(default_factory=dict)
+
+    # ------------------------------------------------------------------
+    # evidence
+    # ------------------------------------------------------------------
+    # Raw, unprocessed perception signals associated with THIS object.
+    #
+    # Each Evidence item captures:
+    #   - which module produced it  (vision / ocr / fashion / vehicle)
+    #   - what feature was observed (class / color / token / patch)
+    #   - the observed value        ("vehicle", "black", "sheriff")
+    #   - confidence score          (0.0 — 1.0)
+    #
+    # Examples:
+    #   Evidence(source="vision", feature="class", value="person", conf=0.93)
+    #   Evidence(source="vision", feature="color", value="black", conf=0.60)
+    #   Evidence(source="ocr",    feature="token", value="sheriff", conf=0.88)
+    #
+    # The rule engine may operate directly on evidence or may use
+    # evidence to populate props.
+    evidence: list[Evidence] = field(default_factory=list)
+
 
 @dataclass
 class VisionResult:
@@ -228,100 +349,14 @@ class VisionResult:
     # As perception grows, this becomes richer but stays clean.
     evidence: List[Evidence] = field(default_factory=list)
 
-@dataclass
-class SceneObject:
     # ------------------------------------------------------------------
-    # object_id
+    # objects
     # ------------------------------------------------------------------
-    # A unique identifier **within this single snapshot**.
+    # A list of SceneObject instances representing individual entities
     #
-    # YOLO detections are enumerated in order and assigned IDs:
-    #    0 → first detected object
-    #    1 → second detected object
-    #    ...
-    #
-    # IMPORTANT:
-    #   - These IDs do NOT persist across events.
-    #   - They exist only to group evidence belonging to the
-    #     same object within a single perception pass.
-    #
-    # Example:
-    #   object_id = 0 → person
-    #   object_id = 1 → vehicle
-    object_id: int
-
-    # ------------------------------------------------------------------
-    # label
-    # ------------------------------------------------------------------
-    # Semantic label describing what kind of object this is.
-    #
-    # Typically derived from YOLO's class mapping (vision), but can
-    # also come from other perception modules.
-    #
-    # Example labels:
-    #   - "person"
-    #   - "vehicle"
-    #   - "dog"
-    #   - "coat"
-    #   - "tie"
-    #   - "package"
-    #
-    # Used heavily by the rule engine to determine the behavior
-    # of an object in context.
-    label: str
-
-    # ------------------------------------------------------------------
-    # parent_id
-    # ------------------------------------------------------------------
-    # Optional link to another SceneObject, forming a hierarchy,
-    # also known as a *scene graph*.
-    #
-    # Useful for representing nested or attached objects:
-    #   person (object_id=0)
-    #     └─ coat (object_id=1)
-    #          └─ tie (object_id=2)
-    #
-    # If None:
-    #   - The object is a top-level item in the scene.
-    parent_id: int | None = None
-
-    # ------------------------------------------------------------------
-    # props
-    # ------------------------------------------------------------------
-    # A dictionary of **canonical flat properties** describing this object.
-    #
-    # These differ from raw Evidence:
-    #   - props represent *aggregated or interpreted facts*
-    #   - evidence represents *individual observed signals*
-    #
-    # Examples of props:
-    #   {
-    #       "color": "tan",
-    #       "age_group": "adult",
-    #       "vehicle_make": "ford",
-    #       "upper_body_color": "brown",
-    #       "has_badge": True
-    #   }
-    #
-    # Props are ideal for downstream rule evaluation or summary generation.
-    props: dict = field(default_factory=dict)
-
-    # ------------------------------------------------------------------
-    # evidence
-    # ------------------------------------------------------------------
-    # Raw, unprocessed perception signals associated with THIS object.
-    #
-    # Each Evidence item captures:
-    #   - which module produced it  (vision / ocr / fashion / vehicle)
-    #   - what feature was observed (class / color / token / patch)
-    #   - the observed value        ("vehicle", "black", "sheriff")
-    #   - confidence score          (0.0 — 1.0)
-    #
-    # Examples:
-    #   Evidence(source="vision", feature="class", value="person", conf=0.93)
-    #   Evidence(source="vision", feature="color", value="black", conf=0.60)
-    #   Evidence(source="ocr",    feature="token", value="sheriff", conf=0.88)
-    #
-    # The rule engine may operate directly on evidence or may use
-    # evidence to populate props.
-    evidence: list[Evidence] = field(default_factory=list)
+    # Example: 
+    # [
+    #  SceneObject( object_id=0, label="person", props={"color": "brown"}, evidence=[...]),
+    #  SceneObject( object_id=1, label="vehicle", props={"color": "black"}, evidence=[...]),
+    # ]   
+    objects: List[SceneObject] = field(default_factory=list)
