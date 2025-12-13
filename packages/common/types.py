@@ -158,14 +158,7 @@ class SceneObject:
     #   object_id = 0 → person
     #   object_id = 1 → vehicle
     object_id: int
-    # ------------------------------------------------------------------
-    # box
-    # ------------------------------------------------------------------
-    # Bounding box (x1, y1, x2, y2) in pixel coordinates.
-    # Useful for:
-    #   - cropping for OCR
-        #   - feeding into Fashion classifier
-    box: Tuple[int, int, int, int] | None = None
+
 
     # ------------------------------------------------------------------
     # parent_id
@@ -201,6 +194,16 @@ class SceneObject:
     # Used heavily by the rule engine to determine the behavior
     # of an object in context.
     label: str
+
+    # ------------------------------------------------------------------
+    # box
+    # ------------------------------------------------------------------
+    # Bounding box (x1, y1, x2, y2) in pixel coordinates.
+    # Useful for:
+    #   - cropping for OCR
+        #   - feeding into Fashion classifier
+    box: Tuple[int, int, int, int] | None = None
+
 
     # ------------------------------------------------------------------
     # parent_id
