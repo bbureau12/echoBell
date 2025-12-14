@@ -1,47 +1,86 @@
-# packages/perception/ocr.py
 import easyocr
 import numpy as np
-from typing import List
+import re
+from typing import Dict, List
 from packages.common.types import Detection
 
 _reader = None
 
+TOKEN_RE = re.compile(r"[a-zA-Z0-9]+")
+
 def _get_reader():
     global _reader
     if _reader is None:
-        # GPU=False is safer for a small box / doorbell device
         _reader = easyocr.Reader(['en'], gpu=False)
     return _reader
 
-def extract_ocr_tokens(frame: np.ndarray, detections: List[Detection]) -> list[str]:
+
+def _easyocr_tokens(crop_bgr: np.ndarray) -> List[str]:
     """
-    Run OCR on relevant regions (vehicles, packages, uniforms, shirts).
-    Returns a de-duplicated list of lowercase tokens.
+    Run EasyOCR on a BGR crop and return normalized tokens.
     """
     reader = _get_reader()
-    tokens: set[str] = set()
 
-    # Simple first pass: run OCR on each detection crop that's likely to have text
-    for det in detections:
+    # EasyOCR expects RGB
+    crop_rgb = crop_bgr[:, :, ::-1]
+
+    try:
+        results = reader.readtext(crop_rgb, detail=0)  # list[str]
+    except Exception:
+        return []
+
+    text = " ".join(str(r) for r in results if r)
+    tokens = [t.lower() for t in TOKEN_RE.findall(text)]
+    return tokens
+
+
+def extract_ocr_tokens_by_object(frame_bgr: np.ndarray, detections: List[Detection]) -> Dict[int, List[str]]:
+    """
+    Returns: { object_id: [token1, token2, ...] }
+    object_id matches enumerate(detections).
+    """
+    out: Dict[int, List[str]] = {}
+    h, w = frame_bgr.shape[:2]
+
+    for obj_id, det in enumerate(detections):
+        # Only OCR likely text-bearing objects
         if det.cls not in {"person", "vehicle", "package"}:
             continue
 
         x1, y1, x2, y2 = det.box
-        crop = frame[y1:y2, x1:x2]
+
+        # clamp
+        x1 = max(0, min(int(x1), w - 1))
+        x2 = max(0, min(int(x2), w))
+        y1 = max(0, min(int(y1), h - 1))
+        y2 = max(0, min(int(y2), h))
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        crop = frame_bgr[y1:y2, x1:x2]
         if crop.size == 0:
             continue
 
-        # detail=0 → just text strings
-        try:
-            results = reader.readtext(crop, detail=0)
-        except Exception as e:
-            # don't kill vision if OCR chokes on a weird crop
-            continue
+        toks = _easyocr_tokens(crop)
+        if toks:
+            # de-dupe per object, preserve order
+            seen = set()
+            ordered = []
+            for t in toks:
+                if t not in seen:
+                    seen.add(t)
+                    ordered.append(t)
+            out[obj_id] = ordered
 
-        for text in results:
-            for tok in str(text).split():
-                tok = tok.strip().lower()
-                if tok:
-                    tokens.add(tok)
+    return out
 
-    return sorted(tokens)
+
+def extract_ocr_tokens(frame: np.ndarray, detections: List[Detection]) -> List[str]:
+    """
+    Convenience: Flatten tokens across objects into a de-duplicated sorted list.
+    """
+    tok_map = extract_ocr_tokens_by_object(frame, detections)
+    all_tokens = set()
+    for toks in tok_map.values():
+        all_tokens.update(toks)
+    return sorted(all_tokens)

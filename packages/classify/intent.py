@@ -67,22 +67,45 @@ def _confidence(raw: float) -> float:
 
 
 def _score_signal_rules(conn: sqlite3.Connection, vision: VisionResult):
-    """
-    Apply signal_rule rows to the evidence in VisionResult.
-
-    Returns:
-      scores:    dict[intent_name -> float]
-      urgencies: dict[intent_name -> list[int]]
-      trace:     list[str]  (human-readable matches)
-    """
     evidence: List[Evidence] = getattr(vision, "evidence", []) or []
+    objects = getattr(vision, "objects", []) or []
+
+    id_to_obj = {o.object_id: o for o in objects}
+
+    def ancestor_labels(obj_id: int) -> set[str]:
+        """Return labels for obj + its ancestors (parent chain)."""
+        labels: set[str] = set()
+        cur = id_to_obj.get(obj_id)
+        while cur is not None:
+            if getattr(cur, "label", None):
+                labels.add(cur.label.lower())
+            pid = getattr(cur, "parent_id", None)
+            if pid is None:
+                break
+            cur = id_to_obj.get(pid)
+        return labels
+
+    def parse_scope_any_of(s: str | None) -> set[str]:
+        """
+        Comma-delimited tokens (exact-match only).
+        Examples:
+          'person, vehicle' -> {'person','vehicle'}
+          '' / None         -> set()
+          '*' / 'any'       -> set()  (treat as unscoped)
+        """
+        if not s:
+            return set()
+        raw = {tok.strip().lower() for tok in s.split(",") if tok.strip()}
+        if not raw or raw.intersection({"*", "any"}):
+            return set()
+        return raw
 
     rows = conn.execute("""
-        SELECT id, source, feature, operator, value, intent_name,
-               weight, min_conf, urgency
+        SELECT source, feature, operator, value, intent_name,
+               weight, min_conf, urgency,
+               COALESCE(scope_any_of,'')
         FROM signal_rule
         WHERE enabled = 1
-        ORDER BY id
     """).fetchall()
 
     scores: Dict[str, float] = defaultdict(float)
@@ -94,19 +117,29 @@ def _score_signal_rules(conn: sqlite3.Connection, vision: VisionResult):
         ev_feature = ev.feature
         ev_val = str(ev.value).lower()
         ev_conf = float(ev.conf)
-        ev_obj = getattr(ev, "object_id", None)
+        ev_obj_id = ev.object_id  # may be None
 
-        for rule_id, source, feature, op, val, intent, weight, min_conf, urg in rows:
+        ev_labels = ancestor_labels(ev_obj_id) if ev_obj_id is not None else set()
+
+        for (source, feature, op, val, intent, weight, min_conf, urg, scope_any_of) in rows:
             if source != ev_source or feature != ev_feature:
                 continue
 
-            min_c = float(min_conf or 0.0)
-            if ev_conf < min_c:
+            # confidence gate
+            if ev_conf < float(min_conf or 0.0):
                 continue
+
+            # scope gate (if any scopes specified, require object evidence)
+            allowed_scopes = parse_scope_any_of(scope_any_of)
+            if allowed_scopes:
+                if ev_obj_id is None:
+                    continue  # can't apply scoped rule to scene-level evidence
+                # ancestor labels includes the object label + parent chain
+                if ev_labels.isdisjoint(allowed_scopes):
+                    continue
 
             rule_val = str(val).lower()
             matched = False
-
             if op == "equals":
                 matched = (ev_val == rule_val)
             elif op == "contains":
@@ -120,10 +153,12 @@ def _score_signal_rules(conn: sqlite3.Connection, vision: VisionResult):
             scores[intent] += delta
             urgencies[intent].append(int(urg or 10))
 
+            scope_dbg = ",".join(sorted(allowed_scopes)) if allowed_scopes else "*"
             trace.append(
-                f"[rule {rule_id}] {intent} +{delta:.2f} "
+                f"[signal_rule] {intent} +{delta:.2f} "
                 f"(w={w:.2f}*conf={ev_conf:.2f}, urg={int(urg or 10)}) "
-                f"because ev(src={ev_source} feat={ev_feature} val={ev_val} obj={ev_obj}) {op} '{rule_val}'"
+                f"because ev(src={ev_source} feat={ev_feature} val={ev_val} obj={ev_obj_id}) "
+                f"{op} '{rule_val}' scope={scope_dbg}"
             )
 
     return scores, urgencies, trace

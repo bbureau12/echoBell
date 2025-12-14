@@ -159,23 +159,7 @@ class SceneObject:
     #   object_id = 1 → vehicle
     object_id: int
 
-
-    # ------------------------------------------------------------------
-    # parent_id
-    # ------------------------------------------------------------------
-    # Points to the ID of another SceneObject that is this object's parent.
-    #
-    # IMPORTANT:
-    #   - These IDs do NOT persist across events.
-    #   - They exist only to group evidence belonging to the
-    #     same object within a single perception pass.
-    #
-    # Example:
-    #   object_id = 1 → self (license plate)
-    #   parent_id = 1 → parent (vehicle)
-    parent_id: int | None = None
-
-    # ------------------------------------------------------------------
+        # ------------------------------------------------------------------
     # label
     # ------------------------------------------------------------------
     # Semantic label describing what kind of object this is.
@@ -194,6 +178,21 @@ class SceneObject:
     # Used heavily by the rule engine to determine the behavior
     # of an object in context.
     label: str
+
+    # ------------------------------------------------------------------
+    # parent_id
+    # ------------------------------------------------------------------
+    # Points to the ID of another SceneObject that is this object's parent.
+    #
+    # IMPORTANT:
+    #   - These IDs do NOT persist across events.
+    #   - They exist only to group evidence belonging to the
+    #     same object within a single perception pass.
+    #
+    # Example:
+    #   object_id = 1 → self (license plate)
+    #   parent_id = 1 → parent (vehicle)
+    parent_id: int | None = None
 
     # ------------------------------------------------------------------
     # box

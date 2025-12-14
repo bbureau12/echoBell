@@ -8,7 +8,7 @@ import cv2
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from packages.common.types import Detection, Evidence, VisionResult, SceneObject
-from .ocr import extract_ocr_tokens
+from .ocr import extract_ocr_tokens, extract_ocr_tokens_by_object
 
 _MODEL = YOLO("yolov8n.pt")
 MODEL_NAME = "yolov8n"
@@ -180,6 +180,7 @@ def snapshot_and_detect(db: str, rtsp: str,
 
         flags = _derive_flags(labels_for_flags)
 
+                # --- VisionResult ---
         vr = VisionResult(
             snapshot_path=snap_path,
             detections=dets,
@@ -190,69 +191,82 @@ def snapshot_and_detect(db: str, rtsp: str,
             uniform=flags["uniform"],
         )
 
-        # 4) Build SceneObjects and object-level evidence
-        scene_objects: list[SceneObject] = []
-        for idx, det in enumerate(dets):
-            # rough entity hint
-            ent = det.cls if det.cls in ("person", "vehicle", "dog", "package") else None
-
+        # --- SceneObjects (1 per detection) + object-level evidence ---
+        for obj_id, det in enumerate(dets):
             obj = SceneObject(
-                object_id=idx,
-                label=det.cls,
+                object_id=obj_id,
+                label=det.cls.lower(),
+                box=det.box,
                 parent_id=None,
             )
-            obj.props["color"] = det.color
 
-            # evidence: class + color
-            obj.evidence.append(
-                Evidence(
-                    source="vision",
-                    feature="class",
-                    value=det.cls.lower(),
-                    conf=det.conf,
-                )
-            )
-            obj.evidence.append(
-                Evidence(
-                    source="vision",
-                    feature="color",
-                    value=det.color.lower(),
-                    conf=0.6,
-                )
-            )
+            # canonical props
+            obj.props["color"] = (det.color or "unknown").lower()
 
-            scene_objects.append(obj)
+            # object evidence
+            obj.evidence.append(Evidence(
+                source="vision",
+                feature="class",
+                value=det.cls.lower(),
+                conf=float(det.conf),
+                object_id=obj_id,
+            ))
+            obj.evidence.append(Evidence(
+                source="vision",
+                feature="color",
+                value=(det.color or "unknown").lower(),
+                conf=0.6,                 # heuristic confidence for color
+                object_id=obj_id,
+            ))
 
-        vr.objects = scene_objects
+            vr.objects.append(obj)
 
-        # 5) Global flag evidence (scene-level)
+        # --- Scene-level flag evidence (object_id=None) ---
         if flags["person_present"]:
-            vr.evidence.append(Evidence("vision", "person_present", "true", 0.9))
+            vr.evidence.append(Evidence("vision", "person_present", "true", 0.9, object_id=None))
         if flags["package_box"]:
-            vr.evidence.append(Evidence("vision", "package_box", "true", 0.9))
+            vr.evidence.append(Evidence("vision", "package_box", "true", 0.9, object_id=None))
         if flags["vehicle_present"]:
-            vr.evidence.append(Evidence("vision", "vehicle_present", "true", 0.9))
+            vr.evidence.append(Evidence("vision", "vehicle_present", "true", 0.9, object_id=None))
         if flags["dog_present"]:
-            vr.evidence.append(Evidence("vision", "dog_present", "true", 0.9))
+            vr.evidence.append(Evidence("vision", "dog_present", "true", 0.9, object_id=None))
 
-        # 6) Merge object evidence into scene-level evidence
-        for obj in scene_objects:
+        # --- Flatten all object evidence into scene evidence (optional but convenient) ---
+        for obj in vr.objects:
             vr.evidence.extend(obj.evidence)
 
-        # 7) OCR → evidence
-        if enable_ocr and dets:
-            tokens = extract_ocr_tokens(frame, dets)
-            vr.ocr_tokens = tokens
-            vr.ocr_raw = " ".join(tokens) if tokens else None
 
-            for tok in tokens:
-                vr.evidence.append(
-                    Evidence(
+        # 7) OCR → evidence
+        # 7) OCR → OBJECT-LEVEL evidence
+        if enable_ocr and dets:
+            ocr_by_obj = extract_ocr_tokens_by_object(frame, dets)
+
+            all_tokens = []
+
+            for obj in vr.objects:
+                obj_tokens = ocr_by_obj.get(obj.object_id, [])
+                if not obj_tokens:
+                    continue
+
+                for tok in obj_tokens:
+                    ev = Evidence(
                         source="ocr",
                         feature="token",
-                        value=tok.lower(),
-                        conf=0.9
+                        value=tok,
+                        conf=0.9,
+                        object_id=obj.object_id,
                     )
-                )
+
+                    # attach to object
+                    obj.evidence.append(ev)
+
+                    # also attach to scene (flattened)
+                    vr.evidence.append(ev)
+
+                    all_tokens.append(tok)
+
+            # optional convenience fields (debug/UI only)
+            vr.ocr_tokens = sorted(set(all_tokens))
+            vr.ocr_raw = " ".join(vr.ocr_tokens) if vr.ocr_tokens else None
 
     return vr
