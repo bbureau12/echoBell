@@ -8,7 +8,8 @@ import cv2
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from packages.common.types import Detection, Evidence, VisionResult, SceneObject
-from .ocr import extract_ocr_tokens, extract_ocr_tokens_by_object
+from .ocr import extract_ocr_tokens_by_object
+from .age import emit_age_evidence_for_people
 
 _MODEL = YOLO("yolov8n.pt")
 MODEL_NAME = "yolov8n"
@@ -236,7 +237,6 @@ def snapshot_and_detect(db: str, rtsp: str,
             vr.evidence.extend(obj.evidence)
 
 
-        # 7) OCR → evidence
         # 7) OCR → OBJECT-LEVEL evidence
         if enable_ocr and dets:
             ocr_by_obj = extract_ocr_tokens_by_object(frame, dets)
@@ -268,5 +268,11 @@ def snapshot_and_detect(db: str, rtsp: str,
             # optional convenience fields (debug/UI only)
             vr.ocr_tokens = sorted(set(all_tokens))
             vr.ocr_raw = " ".join(vr.ocr_tokens) if vr.ocr_tokens else None
+
+            age_evs = emit_age_evidence_for_people(frame, vr.objects)
+            vr.evidence.extend(age_evs)
+            for ev in age_evs:
+                # also attach to the owning object’s evidence list
+                vr.objects[ev.object_id].evidence.append(ev)
 
     return vr
