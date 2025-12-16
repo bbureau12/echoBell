@@ -68,38 +68,49 @@ def _resolve_bind_id(vision: VisionResult, ev_obj_id: int | None, bind_scope: st
     """
     bind_scope controls what "thing" the group binds to.
 
-    Suggested bind_scope values:
-      - 'scene'   -> all evidence shares one bind (None)
-      - 'self'    -> bind to the evidence's object_id
-      - 'root'    -> bind to top-most ancestor object (person/vehicle/etc.)
+    Supported:
+      - 'scene' -> all evidence shares one bind (None)
+      - 'self'  -> bind to the evidence's object_id
+      - 'root'  -> bind to top-most ancestor
+      - <label> -> bind to nearest ancestor whose label matches (e.g. 'person', 'vehicle')
     """
     scope = (bind_scope or "scene").strip().lower()
+
     if scope == "scene":
         return None
     if ev_obj_id is None:
         return None
 
+    objs = getattr(vision, "objects", []) or []
+    id_to_obj = {o.object_id: o for o in objs}
+
     if scope == "self":
         return ev_obj_id
 
-    if scope == "root":
-        # walk parents until no parent
-        objs = getattr(vision, "objects", []) or []
-        id_to_obj = {o.object_id: o for o in objs}
-
-        cur = id_to_obj.get(ev_obj_id)
-        if cur is None:
-            return ev_obj_id
-
-        while getattr(cur, "parent_id", None) is not None:
-            parent = id_to_obj.get(cur.parent_id)
-            if parent is None:
+    # Walk up parent chain helper
+    def walk_up(start_id: int):
+        cur = id_to_obj.get(start_id)
+        while cur is not None:
+            yield cur
+            pid = getattr(cur, "parent_id", None)
+            if pid is None:
                 break
-            cur = parent
-        return getattr(cur, "object_id", ev_obj_id)
+            cur = id_to_obj.get(pid)
 
-    # default fallback
-    return ev_obj_id
+    if scope == "root":
+        last = None
+        for node in walk_up(ev_obj_id):
+            last = node
+        return getattr(last, "object_id", ev_obj_id) if last else ev_obj_id
+
+    # Otherwise treat scope as a label, e.g. 'person'
+    for node in walk_up(ev_obj_id):
+        if (getattr(node, "label", "") or "").lower() == scope:
+            return node.object_id
+
+    # No matching ancestor label → no bind (prevents accidental cross-object grouping)
+    return None
+
 
 def _score_signal_groups(conn, vision: VisionResult, rule_matches: list[RuleMatch]):
     groups = conn.execute("""
@@ -362,18 +373,16 @@ def classify(text: str, vision: VisionResult, db_path: str | None = None) -> Cla
         sig_scores, sig_urgencies, sig_trace, rule_matches = _score_signal_rules(conn, vision)
         trace.extend(sig_trace)
 
-        # group scoring
         grp_scores, grp_urgencies, grp_trace = _score_signal_groups(conn, vision, rule_matches)
         trace.extend(grp_trace)
-
-        for intent_name, s in grp_scores.items():
-            scores[intent_name] += s
-            intent_urgencies[intent_name].extend(grp_urgencies[intent_name])
-
 
         for intent_name, s in sig_scores.items():
             scores[intent_name] += s
             intent_urgencies[intent_name].extend(sig_urgencies[intent_name])
+
+        for intent_name, s in grp_scores.items():
+            scores[intent_name] += s
+            intent_urgencies[intent_name].extend(grp_urgencies[intent_name])
 
     # 3) Final decision
     if not scores:
