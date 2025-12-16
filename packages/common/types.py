@@ -347,20 +347,179 @@ class VisionResult:
     # ]   
     objects: List[SceneObject] = field(default_factory=list)
 
-
 @dataclass(slots=True)
 class RuleMatch:
+    # ------------------------------------------------------------------
+    # rule_id
+    # ------------------------------------------------------------------
+    # The unique identifier of the signal_rule row that fired.
+    #
+    # This allows:
+    #   - grouping multiple rule matches together
+    #   - enforcing required/optional rules in signal groups
+    #   - traceability back to the database definition
+    #
+    # Used heavily by:
+    #   - signal_group_member
+    #   - _score_signal_groups()
     rule_id: int
+
+    # ------------------------------------------------------------------
+    # intent_name
+    # ------------------------------------------------------------------
+    # The intent this rule contributes toward.
+    #
+    # Example values:
+    #   - "authority_urgent"
+    #   - "delivery"
+    #   - "neighbor_help"
+    #
+    # NOTE:
+    #   This is *not* the final intent — multiple RuleMatch instances
+    #   may contribute to the same intent, or be combined via groups.
     intent_name: str
+
+    # ------------------------------------------------------------------
+    # delta
+    # ------------------------------------------------------------------
+    # The weighted contribution this rule match adds to its intent.
+    #
+    # Computed as:
+    #   delta = rule.weight * evidence.confidence
+    #
+    # Example:
+    #   rule.weight = 1.0
+    #   ev.conf      = 0.9
+    #   → delta      = 0.9
+    #
+    # This value is what actually drives scoring.
     delta: float
+
+    # ------------------------------------------------------------------
+    # urgency
+    # ------------------------------------------------------------------
+    # The urgency level associated with this rule.
+    #
+    # Typically:
+    #   - 10  → normal / informational
+    #   - 30  → time-sensitive
+    #   - 90+ → urgent / authority / emergency
+    #
+    # Final urgency for an intent is usually:
+    #   max(all contributing urgencies)
     urgency: int
 
+    # ------------------------------------------------------------------
+    # ev_source
+    # ------------------------------------------------------------------
+    # The subsystem that produced the evidence which triggered this rule.
+    #
+    # Examples:
+    #   - "vision"
+    #   - "ocr"
+    #   - "fashion"
+    #   - "audio"
+    #
+    # Used for:
+    #   - debugging
+    #   - rule trace output
     ev_source: str
+
+    # ------------------------------------------------------------------
+    # ev_feature
+    # ------------------------------------------------------------------
+    # The feature name of the triggering evidence.
+    #
+    # Examples:
+    #   - "token"
+    #   - "class"
+    #   - "color"
+    #   - "age_group"
+    #
+    # Combined with source and operator to define rule semantics.
     ev_feature: str
+
+    # ------------------------------------------------------------------
+    # ev_value
+    # ------------------------------------------------------------------
+    # The normalized value of the evidence that matched the rule.
+    #
+    # Examples:
+    #   - "sheriff"
+    #   - "black"
+    #   - "person"
+    #   - "adult"
+    #
+    # Stored lowercase for consistent matching.
     ev_value: str
+
+    # ------------------------------------------------------------------
+    # ev_conf
+    # ------------------------------------------------------------------
+    # The confidence score of the triggering evidence (0.0 – 1.0).
+    #
+    # This reflects how reliable the underlying perception was:
+    #   - YOLO detection confidence
+    #   - OCR confidence
+    #   - model certainty (age, fashion, etc.)
+    #
+    # Used to scale delta and for trace visibility.
     ev_conf: float
+
+    # ------------------------------------------------------------------
+    # ev_obj_id
+    # ------------------------------------------------------------------
+    # The SceneObject ID this evidence is attached to.
+    #
+    # Examples:
+    #   0 → person
+    #   1 → vehicle
+    #   2 → tie (child of person)
+    #
+    # If None:
+    #   - the evidence is scene-level (e.g. person_present)
+    #
+    # This is critical for:
+    #   - scoping rules to objects
+    #   - binding rules together in groups
     ev_obj_id: int | None
 
+    # ------------------------------------------------------------------
+    # op
+    # ------------------------------------------------------------------
+    # The operator used by the rule to match evidence.
+    #
+    # Examples:
+    #   - "equals"
+    #   - "contains"
+    #
+    # Stored here for:
+    #   - trace/debug output
+    #   - explaining *why* a rule fired
     op: str
+
+    # ------------------------------------------------------------------
+    # rule_value
+    # ------------------------------------------------------------------
+    # The value defined in the rule that was compared against ev_value.
+    #
+    # Examples:
+    #   rule_value = "sheriff"
+    #   rule_value = "black"
+    #
+    # Used only for explanation and traceability.
     rule_value: str
+
+    # ------------------------------------------------------------------
+    # scope_any_of
+    # ------------------------------------------------------------------
+    # The object scope restriction applied by the rule.
+    #
+    # Examples:
+    #   - "person"
+    #   - "vehicle"
+    #   - "person,vehicle"
+    #   - "" / "*" → unscoped (any object or scene)
+    #
+    # Indicates *where* this rule was allowed to fire.
     scope_any_of: str
