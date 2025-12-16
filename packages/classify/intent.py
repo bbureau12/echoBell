@@ -57,7 +57,6 @@ def _fetch_rules(conn: sqlite3.Connection) -> Tuple[
 
     return intents, patterns, entities
 
-
 def _confidence(raw: float) -> float:
     """
     Map a raw score into [0.4, 0.95].
@@ -101,7 +100,6 @@ def _resolve_bind_id(vision: VisionResult, ev_obj_id: int | None, bind_scope: st
 
     # default fallback
     return ev_obj_id
-
 
 def _score_signal_groups(conn, vision: VisionResult, rule_matches: list[RuleMatch]):
     groups = conn.execute("""

@@ -65,6 +65,41 @@ def _fetch_vision_map(conn, model_name: str) -> dict[str, str]:
     ).fetchall()
     return {raw: sem for (raw, sem) in rows}
 
+def _containment(child_box, parent_box) -> float:
+    cx1, cy1, cx2, cy2 = child_box
+    px1, py1, px2, py2 = parent_box
+
+    ix1, iy1 = max(cx1, px1), max(cy1, py1)
+    ix2, iy2 = min(cx2, px2), min(cy2, py2)
+    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+    inter = iw * ih
+
+    c_area = max(1, (cx2 - cx1) * (cy2 - cy1))
+    return inter / c_area  # “% of child covered by parent”
+
+def _attach_children(scene_objects):
+    persons = [o for o in scene_objects if (o.label or "").lower() == "person" and o.box]
+
+    for o in scene_objects:
+        if not o.box:
+            continue
+        if (o.label or "").lower() == "person":
+            continue
+
+        best_parent = None
+        best_score = 0.0
+        for p in persons:
+            s = _containment(o.box, p.box)
+            if s > best_score:
+                best_score = s
+                best_parent = p
+
+        # require strong containment so we don't attach random background junk
+        if best_parent and best_score >= 0.70:
+            o.parent_id = best_parent.object_id
+
+
+
 
 def _dominant_color_rgb(crop: np.ndarray, k: int = 3) -> np.ndarray:
     if crop is None or crop.size == 0:
@@ -94,7 +129,6 @@ def _closest_color_name(rgb: np.ndarray) -> str:
         if dist < best_dist:
             best_name, best_dist = name, dist
     return best_name
-
 
 def snapshot_and_detect(db: str, rtsp: str,
                         debug: bool = True,
@@ -231,6 +265,7 @@ def snapshot_and_detect(db: str, rtsp: str,
             ))
 
             vr.objects.append(obj)
+            _attach_children(vr.objects)
 
         # --- Scene-level flag evidence (object_id=None) ---
         if flags["person_present"]:
