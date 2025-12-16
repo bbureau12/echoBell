@@ -1,4 +1,5 @@
 # packages/perception/vision.py
+from collections import defaultdict
 import sqlite3
 import os, time
 from typing import List
@@ -65,40 +66,114 @@ def _fetch_vision_map(conn, model_name: str) -> dict[str, str]:
     ).fetchall()
     return {raw: sem for (raw, sem) in rows}
 
-def _containment(child_box, parent_box) -> float:
-    cx1, cy1, cx2, cy2 = child_box
-    px1, py1, px2, py2 = parent_box
+def _bbox_area(b: tuple[int,int,int,int]) -> float:
+    x1, y1, x2, y2 = b
+    return max(0, x2 - x1) * max(0, y2 - y1)
 
-    ix1, iy1 = max(cx1, px1), max(cy1, py1)
-    ix2, iy2 = min(cx2, px2), min(cy2, py2)
-    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
-    inter = iw * ih
+def _intersection_area(a: tuple[int,int,int,int], b: tuple[int,int,int,int]) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    return max(0, ix2 - ix1) * max(0, iy2 - iy1)
 
-    c_area = max(1, (cx2 - cx1) * (cy2 - cy1))
-    return inter / c_area  # “% of child covered by parent”
+def _containment_ratio(child_box: tuple[int,int,int,int], parent_box: tuple[int,int,int,int]) -> float:
+    """How much of the child is inside the parent: intersection_area / child_area."""
+    c_area = _bbox_area(child_box)
+    if c_area <= 0:
+        return 0.0
+    inter = _intersection_area(child_box, parent_box)
+    return inter / c_area
 
-def _attach_children(scene_objects):
-    persons = [o for o in scene_objects if (o.label or "").lower() == "person" and o.box]
+def _parse_parent_any_of(s: str) -> set[str]:
+    return {t.strip().lower() for t in (s or "").split(",") if t.strip()}
 
-    for o in scene_objects:
-        if not o.box:
+def _attach_children(conn: sqlite3.Connection, objects: list[SceneObject], debug: bool = False) -> None:
+    """
+    Mutates objects in-place: sets child.parent_id based on attach_rule.
+    """
+    rows = conn.execute("""
+        SELECT child_label, parent_any_of, min_containment, min_parent_conf, prefer_parent
+        FROM attach_rule
+        WHERE enabled = 1
+    """).fetchall()
+
+    if not rows or not objects:
+        return
+
+    # index objects by label
+    by_label: dict[str, list[SceneObject]] = defaultdict(list)
+    for o in objects:
+        if o.label:
+            by_label[o.label.lower()].append(o)
+
+    for child_label, parent_any_of, min_cont, min_parent_conf, prefer_parent in rows:
+        child_label = (child_label or "").strip().lower()
+        if not child_label:
             continue
-        if (o.label or "").lower() == "person":
+
+        parents_allowed = _parse_parent_any_of(parent_any_of)
+        if not parents_allowed:
             continue
 
-        best_parent = None
-        best_score = 0.0
-        for p in persons:
-            s = _containment(o.box, p.box)
-            if s > best_score:
-                best_score = s
-                best_parent = p
+        children = by_label.get(child_label, [])
+        if not children:
+            continue
 
-        # require strong containment so we don't attach random background junk
-        if best_parent and best_score >= 0.70:
-            o.parent_id = best_parent.object_id
+        parent_candidates: list[SceneObject] = []
+        for p_label in parents_allowed:
+            parent_candidates.extend(by_label.get(p_label, []))
 
+        if not parent_candidates:
+            continue
 
+        min_cont = float(min_cont or 0.70)
+        min_parent_conf = float(min_parent_conf or 0.60)
+        prefer_parent = (prefer_parent or "best_score").strip().lower()
+
+        for child in children:
+            # already attached? skip (or override if you want)
+            if getattr(child, "parent_id", None) is not None:
+                continue
+            if not getattr(child, "box", None):
+                continue
+
+            best_parent = None
+            best_score = -1.0
+
+            for parent in parent_candidates:
+                if not getattr(parent, "box", None):
+                    continue
+
+                p_conf = float(parent.props.get("conf", 0.0) or 0.0)
+                if p_conf < min_parent_conf:
+                    continue
+
+                ratio = _containment_ratio(child.box, parent.box)
+                if ratio < min_cont:
+                    continue
+
+                # choose parent scoring strategy
+                if prefer_parent == "largest":
+                    score = _bbox_area(parent.box)
+                elif prefer_parent == "highest_conf":
+                    score = p_conf
+                else:
+                    # "best_score": containment ratio weighted by parent confidence (nice default)
+                    score = ratio * p_conf
+
+                if score > best_score:
+                    best_score = score
+                    best_parent = parent
+
+            if best_parent is not None:
+                child.parent_id = best_parent.object_id
+                if debug:
+                    print(
+                        f"[ATTACH] {child.label}#{child.object_id} -> "
+                        f"{best_parent.label}#{best_parent.object_id} "
+                        f"(score={best_score:.3f})"
+                    )
 
 
 def _dominant_color_rgb(crop: np.ndarray, k: int = 3) -> np.ndarray:
@@ -247,6 +322,7 @@ def snapshot_and_detect(db: str, rtsp: str,
 
             # canonical props
             obj.props["color"] = (det.color or "unknown").lower()
+            obj.props["conf"] = float(det.conf)   # <-- IMPORTANT for attach filtering
 
             # object evidence
             obj.evidence.append(Evidence(
@@ -260,12 +336,15 @@ def snapshot_and_detect(db: str, rtsp: str,
                 source="vision",
                 feature="color",
                 value=(det.color or "unknown").lower(),
-                conf=0.6,                 # heuristic confidence for color
+                conf=0.6,
                 object_id=obj_id,
             ))
 
             vr.objects.append(obj)
-            _attach_children(vr.objects)
+
+        # Attach AFTER all objects exist
+        _attach_children(conn, vr.objects, debug=debug)
+
 
         # --- Scene-level flag evidence (object_id=None) ---
         if flags["person_present"]:
