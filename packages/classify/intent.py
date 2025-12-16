@@ -7,7 +7,7 @@ from typing import Dict, List, Tuple
 
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-from packages.common.types import Evidence, VisionResult  # shared dataclasses
+from packages.common.types import Evidence, VisionResult , RuleMatch # shared dataclasses
 
 
 @dataclass(slots=True)
@@ -65,15 +65,121 @@ def _confidence(raw: float) -> float:
     conf = 0.5 + 0.15 * raw
     return max(0.4, min(0.95, conf))
 
+def _resolve_bind_id(vision: VisionResult, ev_obj_id: int | None, bind_scope: str | None) -> int | None:
+    """
+    bind_scope controls what "thing" the group binds to.
+
+    Suggested bind_scope values:
+      - 'scene'   -> all evidence shares one bind (None)
+      - 'self'    -> bind to the evidence's object_id
+      - 'root'    -> bind to top-most ancestor object (person/vehicle/etc.)
+    """
+    scope = (bind_scope or "scene").strip().lower()
+    if scope == "scene":
+        return None
+    if ev_obj_id is None:
+        return None
+
+    if scope == "self":
+        return ev_obj_id
+
+    if scope == "root":
+        # walk parents until no parent
+        objs = getattr(vision, "objects", []) or []
+        id_to_obj = {o.object_id: o for o in objs}
+
+        cur = id_to_obj.get(ev_obj_id)
+        if cur is None:
+            return ev_obj_id
+
+        while getattr(cur, "parent_id", None) is not None:
+            parent = id_to_obj.get(cur.parent_id)
+            if parent is None:
+                break
+            cur = parent
+        return getattr(cur, "object_id", ev_obj_id)
+
+    # default fallback
+    return ev_obj_id
+
+
+def _score_signal_groups(conn, vision: VisionResult, rule_matches: list[RuleMatch]):
+    groups = conn.execute("""
+      SELECT id, name, intent_name, group_mode, bind_scope, base_weight, urgency
+      FROM signal_group WHERE enabled=1
+    """).fetchall()
+
+    members = conn.execute("""
+      SELECT group_id, rule_id, required, weight_mul
+      FROM signal_group_member
+      WHERE enabled=1
+    """).fetchall()
+
+    members_by_group = defaultdict(list)
+    required_by_group = defaultdict(set)
+    for gid, rid, req, mul in members:
+        members_by_group[gid].append((int(rid), int(req or 0), float(mul or 1.0)))
+        if int(req or 0) == 1:
+            required_by_group[gid].add(int(rid))
+
+    # Index matches by rule_id only; bind depends on group.bind_scope
+    matches_by_rule = defaultdict(list)
+    for m in rule_matches:
+        matches_by_rule[int(m.rule_id)].append(m)
+
+    scores = defaultdict(float)
+    urgencies = defaultdict(list)
+    trace = []
+
+    for gid, name, intent, mode, bind_scope, base_w, g_urg in groups:
+        group_members = members_by_group.get(gid, [])
+        if not group_members:
+            continue
+
+        # Build (rule_id, bind_id) -> [matches] for THIS group (bind_scope aware)
+        by_rule_and_bind = defaultdict(list)
+        candidate_binds = set()
+
+        for rid, _req, _mul in group_members:
+            for m in matches_by_rule.get(rid, []):
+                bind_id = _resolve_bind_id(vision, m.ev_obj_id, bind_scope)
+                by_rule_and_bind[(rid, bind_id)].append(m)
+                candidate_binds.add(bind_id)
+
+        for bind_id in candidate_binds or {None}:
+            # required check
+            ok = True
+            for rid in required_by_group.get(gid, set()):
+                if not by_rule_and_bind.get((rid, bind_id)):
+                    ok = False
+                    break
+            if not ok:
+                continue
+
+            total = float(base_w or 0.0)
+
+            # add contributions per member (best match wins per rule_id)
+            for rid, _req, mul in group_members:
+                ms = by_rule_and_bind.get((rid, bind_id), [])
+                if not ms:
+                    continue
+                best = max(ms, key=lambda x: x.delta)
+                total += best.delta * float(mul or 1.0)
+
+            scores[str(intent)] += total
+            urgencies[str(intent)].append(int(g_urg or 10))
+            trace.append(f"[group {name}] {intent} +{total:.2f} bind={bind_id} scope={bind_scope}")
+
+    return scores, urgencies, trace
+
+
 
 def _score_signal_rules(conn: sqlite3.Connection, vision: VisionResult):
     evidence: List[Evidence] = getattr(vision, "evidence", []) or []
     objects = getattr(vision, "objects", []) or []
-
     id_to_obj = {o.object_id: o for o in objects}
 
     def ancestor_labels(obj_id: int) -> set[str]:
-        """Return labels for obj + its ancestors (parent chain)."""
         labels: set[str] = set()
         cur = id_to_obj.get(obj_id)
         while cur is not None:
@@ -86,13 +192,6 @@ def _score_signal_rules(conn: sqlite3.Connection, vision: VisionResult):
         return labels
 
     def parse_scope_any_of(s: str | None) -> set[str]:
-        """
-        Comma-delimited tokens (exact-match only).
-        Examples:
-          'person, vehicle' -> {'person','vehicle'}
-          '' / None         -> set()
-          '*' / 'any'       -> set()  (treat as unscoped)
-        """
         if not s:
             return set()
         raw = {tok.strip().lower() for tok in s.split(",") if tok.strip()}
@@ -101,40 +200,47 @@ def _score_signal_rules(conn: sqlite3.Connection, vision: VisionResult):
         return raw
 
     rows = conn.execute("""
-        SELECT source, feature, operator, value, intent_name,
+        SELECT id, source, feature, operator, value, intent_name,
                weight, min_conf, urgency,
                COALESCE(scope_any_of,'')
         FROM signal_rule
         WHERE enabled = 1
     """).fetchall()
 
+    # Index rules by (source, feature) so we don't scan all rules for every evidence item
+    rules_by_key = defaultdict(list)
+    for (rule_id, source, feature, op, val, intent, weight, min_conf, urg, scope_any_of) in rows:
+        rules_by_key[(str(source), str(feature))].append(
+            (int(rule_id), str(op), str(val), str(intent),
+             float(weight or 1.0), float(min_conf or 0.0), int(urg or 10),
+             str(scope_any_of or ""))
+        )
+
     scores: Dict[str, float] = defaultdict(float)
     urgencies: Dict[str, List[int]] = defaultdict(list)
     trace: List[str] = []
+    rule_matches: List[RuleMatch] = []  # expects your common dataclass
 
     for ev in evidence:
-        ev_source = ev.source
-        ev_feature = ev.feature
+        ev_source = str(ev.source)
+        ev_feature = str(ev.feature)
         ev_val = str(ev.value).lower()
         ev_conf = float(ev.conf)
-        ev_obj_id = ev.object_id  # may be None
+        ev_obj_id = getattr(ev, "object_id", None)
 
+        # precompute labels for scoped rules
         ev_labels = ancestor_labels(ev_obj_id) if ev_obj_id is not None else set()
 
-        for (source, feature, op, val, intent, weight, min_conf, urg, scope_any_of) in rows:
-            if source != ev_source or feature != ev_feature:
-                continue
-
+        for (rule_id, op, val, intent, weight, min_conf, urg, scope_any_of) in rules_by_key.get((ev_source, ev_feature), []):
             # confidence gate
-            if ev_conf < float(min_conf or 0.0):
+            if ev_conf < min_conf:
                 continue
 
-            # scope gate (if any scopes specified, require object evidence)
+            # scope gate
             allowed_scopes = parse_scope_any_of(scope_any_of)
             if allowed_scopes:
                 if ev_obj_id is None:
-                    continue  # can't apply scoped rule to scene-level evidence
-                # ancestor labels includes the object label + parent chain
+                    continue  # scoped rules can't match scene-level evidence
                 if ev_labels.isdisjoint(allowed_scopes):
                     continue
 
@@ -144,24 +250,49 @@ def _score_signal_rules(conn: sqlite3.Connection, vision: VisionResult):
                 matched = (ev_val == rule_val)
             elif op == "contains":
                 matched = (rule_val in ev_val)
+            else:
+                continue  # unknown operator
 
             if not matched:
                 continue
 
-            w = float(weight or 1.0)
-            delta = w * ev_conf
+            delta = float(weight) * ev_conf
+
+            # standalone scoring (if you want some rules to be "group-only" later,
+            # this is where you'd gate it with a contributes_standalone column)
             scores[intent] += delta
-            urgencies[intent].append(int(urg or 10))
+            urgencies[intent].append(urg)
 
             scope_dbg = ",".join(sorted(allowed_scopes)) if allowed_scopes else "*"
             trace.append(
-                f"[signal_rule] {intent} +{delta:.2f} "
-                f"(w={w:.2f}*conf={ev_conf:.2f}, urg={int(urg or 10)}) "
+                f"[signal_rule {rule_id}] {intent} +{delta:.2f} "
+                f"(w={weight:.2f}*conf={ev_conf:.2f}, urg={urg}) "
                 f"because ev(src={ev_source} feat={ev_feature} val={ev_val} obj={ev_obj_id}) "
                 f"{op} '{rule_val}' scope={scope_dbg}"
             )
 
-    return scores, urgencies, trace
+            # record match for grouping
+            rule_matches.append(
+            RuleMatch(
+                rule_id=rule_id,
+                intent_name=str(intent),
+                delta=delta,
+                urgency=int(urg or 10),
+
+                ev_source=ev_source,
+                ev_feature=ev_feature,
+                ev_value=ev_val,
+                ev_conf=ev_conf,
+                ev_obj_id=ev_obj_id,
+
+                op=op,
+                rule_value=rule_val,
+                scope_any_of=scope_any_of or ""
+            )
+        )
+
+
+    return scores, urgencies, trace, rule_matches
 
 
 
@@ -230,8 +361,17 @@ def classify(text: str, vision: VisionResult, db_path: str | None = None) -> Cla
         # 2) MULTIMODAL EVIDENCE: signal_rule over vision.evidence
         trace: List[str] = []
 
-        sig_scores, sig_urgencies, sig_trace  = _score_signal_rules(conn, vision)
+        sig_scores, sig_urgencies, sig_trace, rule_matches = _score_signal_rules(conn, vision)
         trace.extend(sig_trace)
+
+        # group scoring
+        grp_scores, grp_urgencies, grp_trace = _score_signal_groups(conn, vision, rule_matches)
+        trace.extend(grp_trace)
+
+        for intent_name, s in grp_scores.items():
+            scores[intent_name] += s
+            intent_urgencies[intent_name].extend(grp_urgencies[intent_name])
+
 
         for intent_name, s in sig_scores.items():
             scores[intent_name] += s

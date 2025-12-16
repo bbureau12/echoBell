@@ -203,22 +203,6 @@ class SceneObject:
         #   - feeding into Fashion classifier
     box: Tuple[int, int, int, int] | None = None
 
-
-    # ------------------------------------------------------------------
-    # parent_id
-    # ------------------------------------------------------------------
-    # Optional link to another SceneObject, forming a hierarchy,
-    # also known as a *scene graph*.
-    #
-    # Useful for representing nested or attached objects:
-    #   person (object_id=0)
-    #     └─ coat (object_id=1)
-    #          └─ tie (object_id=2)
-    #
-    # If None:
-    #   - The object is a top-level item in the scene.
-    parent_id: int | None = None
-
     # ------------------------------------------------------------------
     # props
     # ------------------------------------------------------------------
@@ -362,3 +346,21 @@ class VisionResult:
     #  SceneObject( object_id=1, label="vehicle", props={"color": "black"}, evidence=[...]),
     # ]   
     objects: List[SceneObject] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class RuleMatch:
+    rule_id: int
+    intent_name: str
+    delta: float
+    urgency: int
+
+    ev_source: str
+    ev_feature: str
+    ev_value: str
+    ev_conf: float
+    ev_obj_id: int | None
+
+    op: str
+    rule_value: str
+    scope_any_of: str

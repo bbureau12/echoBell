@@ -39,6 +39,13 @@ CSS_COLORS = {
     "tan":    (210, 180, 140),
 }
 
+MIN_CONF = {
+    "person": 0.45,
+    "tie": 0.50,
+    "vehicle": 0.40,
+    "package": 0.35,
+    "dog": 0.35,
+}
 
 def _derive_flags(labels: List[str]) -> dict:
     return {
@@ -112,7 +119,7 @@ def snapshot_and_detect(db: str, rtsp: str,
         cv2.imwrite(snap_path, frame)
 
     # 2) YOLO
-    res = _MODEL(frame, imgsz=640, conf=0.25, iou=0.45, verbose=False)[0]
+    res = _MODEL(frame, imgsz=640, conf=0.40, iou=0.45, verbose=False)[0]
     h, w = frame.shape[:2]
 
     with sqlite3.connect(db) as conn:
@@ -151,6 +158,9 @@ def snapshot_and_detect(db: str, rtsp: str,
             cls_name = res.names[int(c)]
             mapped = positive_classes.get(cls_name)
             if not mapped:
+                continue
+            min_c = MIN_CONF.get(mapped, 0.25)
+            if float(score) < min_c:
                 continue
 
             x1, y1, x2, y2 = map(int, b.tolist())
