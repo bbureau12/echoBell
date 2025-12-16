@@ -221,7 +221,7 @@ def _score_signal_rules(conn: sqlite3.Connection, vision: VisionResult):
     for (rule_id, source, feature, op, val, intent, weight, min_conf, urg, scope_any_of) in rows:
         rules_by_key[(str(source), str(feature))].append(
             (int(rule_id), str(op), str(val), str(intent),
-             float(weight or 1.0), float(min_conf or 0.0), int(urg or 10),
+             float(weight) if weight is not None else 1.0, float(min_conf or 0.0), int(urg or 10),
              str(scope_any_of or ""))
         )
 
@@ -269,8 +269,9 @@ def _score_signal_rules(conn: sqlite3.Connection, vision: VisionResult):
 
             # standalone scoring (if you want some rules to be "group-only" later,
             # this is where you'd gate it with a contributes_standalone column)
-            scores[intent] += delta
-            urgencies[intent].append(urg)
+            if delta > 0.0:
+                scores[intent] += delta
+                urgencies[intent].append(urg)
 
             scope_dbg = ",".join(sorted(allowed_scopes)) if allowed_scopes else "*"
             trace.append(
@@ -385,7 +386,7 @@ def classify(text: str, vision: VisionResult, db_path: str | None = None) -> Cla
             intent_urgencies[intent_name].extend(grp_urgencies[intent_name])
 
     # 3) Final decision
-    if not scores:
+    if not scores or max(scores.values()) <= 0.0:
         return Classified("unknown", 0.45, 10, trace=[])
 
     best_intent = max(scores, key=scores.get)
