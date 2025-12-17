@@ -12,6 +12,13 @@ from packages.common.types import Detection, Evidence, VisionResult, SceneObject
 from .ocr import extract_ocr_tokens_by_object
 from .age import emit_age_evidence_for_people
 
+# Import torch_utils for safe model loading
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+from tools.torch_utils import allowlist_checkpoint_globals
+
+# Allowlist YOLO model for PyTorch 2.6+ "weights_only" loading
+allowlist_checkpoint_globals("yolov8n.pt")
+
 _MODEL = YOLO("yolov8n.pt")
 MODEL_NAME = "yolov8n"
 

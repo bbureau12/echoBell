@@ -217,5 +217,7 @@ data/*.jpg
 data/*.jpeg
 data/*
 
+# models
+models/
 # venv
 .venv-vision/
