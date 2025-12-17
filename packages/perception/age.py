@@ -11,7 +11,7 @@ import torch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from packages.common.types import Evidence, SceneObject
-from tools.torch_utils import allowlist_checkpoint_globals
+from tools.torch_utils import allowlist_checkpoint_globals, enable_ultralytics_safe_load
 
 
 # ----------------------------
@@ -22,67 +22,6 @@ from tools.torch_utils import allowlist_checkpoint_globals
 # even if age grouping is disabled / deps not installed.
 
 _mivolo_predictor = None
-
-def enable_ultralytics_safe_load():
-    import importlib
-    import torch
-
-    def _alias(real_module: str, class_name: str, expected_module: str = "ultralytics.nn.modules"):
-        """
-        Create an alias class whose fully-qualified name matches expected_module.class_name,
-        backed by the real implementation from real_module.class_name.
-        """
-        try:
-            Real = getattr(importlib.import_module(real_module), class_name)
-            target_mod = importlib.import_module(expected_module)
-
-            Alias = type(class_name, (Real,), {})
-            Alias.__module__ = expected_module
-            Alias.__name__ = class_name
-            Alias.__qualname__ = class_name
-
-            setattr(target_mod, class_name, Alias)
-            return Alias
-        except Exception:
-            return None
-
-    safe = []
-
-    # DetectionModel (sometimes required)
-    try:
-        DetectionModel = importlib.import_module("ultralytics.nn.tasks").DetectionModel
-        safe.append(DetectionModel)
-    except Exception:
-        pass
-
-    # Map: checkpoint expects ultralytics.nn.modules.<Name>
-    # to the real places in modern ultralytics
-    candidates = [
-        ("ultralytics.nn.modules.conv",  "Conv"),
-        ("ultralytics.nn.modules.conv",  "Concat"),
-        ("ultralytics.nn.modules.block", "C2f"),
-        ("ultralytics.nn.modules.block", "Bottleneck"),
-        # likely next ones (harmless if they don't exist in your install):
-        ("ultralytics.nn.modules.block", "SPPF"),
-        ("ultralytics.nn.modules.head",  "Detect"),
-        ("ultralytics.nn.modules.block", "C3"),
-        ("ultralytics.nn.modules.block", "C3k2"),
-        ("ultralytics.nn.modules.block", "BottleneckCSP"),
-        ("ultralytics.nn.modules.block", "DFL"),
-    ]
-
-    for mod, name in candidates:
-        alias = _alias(mod, name)
-        if alias is not None:
-            safe.append(alias)
-
-    if safe:
-        torch.serialization.add_safe_globals(safe)
-
-
-
-
-
 def _get_predictor():
     global _mivolo_predictor
     if _mivolo_predictor is not None:
