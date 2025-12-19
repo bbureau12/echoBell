@@ -8,6 +8,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from packages.classify.classify_and_log import classify_and_log
 from packages.perception.vision import snapshot_and_detect
 from packages.classify.intent import classify
 
@@ -77,7 +78,14 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
         vr = snapshot_and_detect(db_path, file_path, debug=debug)
 
         # 2) Run intent classification (just vision; text="")
-        classified = classify("", vr, db_path=db_path)
+        classified, event_id = classify_and_log(
+            db_path=db_path,
+            vision=vr,
+            text="",
+            event_id=None,
+            lock_conf_threshold=0.85,
+        )
+        print("intent:", classified.intent, classified.conf, "event:", event_id)
 
         # 3) Print detections summary
         print("Detections:")

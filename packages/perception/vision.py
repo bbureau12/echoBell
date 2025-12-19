@@ -15,6 +15,8 @@ from .age import emit_age_evidence_for_people
 # Import torch_utils for safe model loading
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from tools.torch_utils import allowlist_checkpoint_globals
+from packages.perception.visitor import process_person_and_emit_evidence
+from packages.data.visitor_memory import fetch_best_prior_intent, log_visitor_event_intent
 
 # Allowlist YOLO model for PyTorch 2.6+ "weights_only" loading
 allowlist_checkpoint_globals("yolov8n.pt")
@@ -212,11 +214,19 @@ def _closest_color_name(rgb: np.ndarray) -> str:
             best_name, best_dist = name, dist
     return best_name
 
-def snapshot_and_detect(db: str, rtsp: str,
-                        debug: bool = True,
-                        enable_ocr: bool = True) -> VisionResult:
-    import cv2, time
-    from packages.common.types import Detection, VisionResult
+def snapshot_and_detect(
+    db: str,
+    rtsp: str,
+    *,
+    camera_id: str | None = None,
+    debug: bool = True,
+    enable_ocr: bool = True,
+) -> VisionResult:
+    import cv2, time, sqlite3
+    from packages.common.types import Detection, VisionResult, Evidence, SceneObject
+    from packages.perception.visitor import process_person_and_emit_evidence
+    # NOTE: extract_ocr_tokens_by_object, emit_age_evidence_for_people, _attach_children
+    # are assumed to already exist in this module, as in your current file. :contentReference[oaicite:1]{index=1}
 
     # 1) Grab frame or image
     if rtsp.lower().endswith((".jpg", ".jpeg", ".png")):
@@ -275,6 +285,7 @@ def snapshot_and_detect(db: str, rtsp: str,
             mapped = positive_classes.get(cls_name)
             if not mapped:
                 continue
+
             min_c = MIN_CONF.get(mapped, 0.25)
             if float(score) < min_c:
                 continue
@@ -290,10 +301,7 @@ def snapshot_and_detect(db: str, rtsp: str,
             color_name = _closest_color_name(dom_rgb)
 
             if debug:
-                print(
-                    f"  -> mapped={mapped}, color={color_name}, "
-                    f"rgb={dom_rgb.astype(int).tolist()}"
-                )
+                print(f"  -> mapped={mapped}, color={color_name}, rgb={dom_rgb.astype(int).tolist()}")
 
             dets.append(
                 Detection(
@@ -307,7 +315,7 @@ def snapshot_and_detect(db: str, rtsp: str,
 
         flags = _derive_flags(labels_for_flags)
 
-                # --- VisionResult ---
+        # 4) VisionResult
         vr = VisionResult(
             snapshot_path=snap_path,
             detections=dets,
@@ -318,7 +326,11 @@ def snapshot_and_detect(db: str, rtsp: str,
             uniform=flags["uniform"],
         )
 
-        # --- SceneObjects (1 per detection) + object-level evidence ---
+        # (Optional) scene metadata evidence (useful once you have two cams)
+        if camera_id:
+            vr.evidence.append(Evidence("vision", "camera_id", camera_id, 1.0, object_id=None))
+
+        # 5) SceneObjects + base object evidence
         for obj_id, det in enumerate(dets):
             obj = SceneObject(
                 object_id=obj_id,
@@ -327,33 +339,44 @@ def snapshot_and_detect(db: str, rtsp: str,
                 parent_id=None,
             )
 
-            # canonical props
             obj.props["color"] = (det.color or "unknown").lower()
-            obj.props["conf"] = float(det.conf)   # <-- IMPORTANT for attach filtering
+            obj.props["conf"] = float(det.conf)
 
-            # object evidence
-            obj.evidence.append(Evidence(
-                source="vision",
-                feature="class",
-                value=det.cls.lower(),
-                conf=float(det.conf),
-                object_id=obj_id,
-            ))
-            obj.evidence.append(Evidence(
-                source="vision",
-                feature="color",
-                value=(det.color or "unknown").lower(),
-                conf=0.6,
-                object_id=obj_id,
-            ))
+            obj.evidence.append(Evidence("vision", "class", det.cls.lower(), float(det.conf), object_id=obj_id))
+            obj.evidence.append(Evidence("vision", "color", (det.color or "unknown").lower(), 0.6, object_id=obj_id))
 
             vr.objects.append(obj)
 
-        # Attach AFTER all objects exist
+        # 6) Parent/child attach
         _attach_children(conn, vr.objects, debug=debug)
 
+        # 6.5) Visitor recognition (per-person)
+        now_ts = int(time.time())
+        for obj in vr.objects:
+            if obj.label != "person":
+                continue
 
-        # --- Scene-level flag evidence (object_id=None) ---
+            x1, y1, x2, y2 = obj.box
+
+            match = process_person_and_emit_evidence(
+                conn=conn,
+                vr=vr,
+                frame_bgr=frame,
+                person_object_id=obj.object_id,
+                person_box=(x1, y1, x2, y2),
+                now_ts=now_ts,
+            )
+
+            # Convenience props for the pipeline after intent.classify()
+            if match and match.visitor_id:
+                obj.props["visitor_id"] = match.visitor_id
+                obj.props["visitor_kind"] = match.kind
+                obj.props["visitor_similarity"] = float(match.similarity or 0.0)
+                prior = fetch_best_prior_intent(conn, obj.props["visitor_id"], now_ts=now_ts)
+                if prior:
+                    vr.evidence.append(Evidence("visitor", "prior_intent", prior.intent, prior.conf, object_id=obj.object_id))
+
+        # 7) Scene-level flags (object_id=None)
         if flags["person_present"]:
             vr.evidence.append(Evidence("vision", "person_present", "true", 0.9, object_id=None))
         if flags["package_box"]:
@@ -363,16 +386,10 @@ def snapshot_and_detect(db: str, rtsp: str,
         if flags["dog_present"]:
             vr.evidence.append(Evidence("vision", "dog_present", "true", 0.9, object_id=None))
 
-        # --- Flatten all object evidence into scene evidence (optional but convenient) ---
-        for obj in vr.objects:
-            vr.evidence.extend(obj.evidence)
-
-
-        # 7) OCR → OBJECT-LEVEL evidence
+        # 8) OCR → object-level only (no direct vr.evidence append; we'll flatten once)
         if enable_ocr and dets:
             ocr_by_obj = extract_ocr_tokens_by_object(frame, dets)
-
-            all_tokens = []
+            all_tokens: list[str] = []
 
             for obj in vr.objects:
                 obj_tokens = ocr_by_obj.get(obj.object_id, [])
@@ -380,30 +397,22 @@ def snapshot_and_detect(db: str, rtsp: str,
                     continue
 
                 for tok in obj_tokens:
-                    ev = Evidence(
-                        source="ocr",
-                        feature="token",
-                        value=tok,
-                        conf=0.9,
-                        object_id=obj.object_id,
-                    )
-
-                    # attach to object
+                    ev = Evidence("ocr", "token", tok, 0.9, object_id=obj.object_id)
                     obj.evidence.append(ev)
-
-                    # also attach to scene (flattened)
-                    vr.evidence.append(ev)
-
                     all_tokens.append(tok)
 
-            # optional convenience fields (debug/UI only)
             vr.ocr_tokens = sorted(set(all_tokens))
             vr.ocr_raw = " ".join(vr.ocr_tokens) if vr.ocr_tokens else None
 
-            age_evs = emit_age_evidence_for_people(frame, vr.objects)
-            vr.evidence.extend(age_evs)
-            for ev in age_evs:
-                # also attach to the owning object’s evidence list
+        # 9) Age evidence (independent of OCR; object-level only, then flatten)
+        age_evs = emit_age_evidence_for_people(frame, vr.objects)
+        for ev in age_evs:
+            # attach to owning object’s evidence list
+            if ev.object_id is not None and 0 <= ev.object_id < len(vr.objects):
                 vr.objects[ev.object_id].evidence.append(ev)
+
+        # 10) Flatten ONCE at the end
+        for obj in vr.objects:
+            vr.evidence.extend(obj.evidence)
 
     return vr
