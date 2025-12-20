@@ -94,24 +94,54 @@ def _has_cuda() -> bool:
 def extract_reid_embedding(frame_bgr: np.ndarray, box: Tuple[int, int, int, int], *, model_name: str) -> np.ndarray:
     """
     Returns L2-normalized float32 embedding suitable for cosine similarity.
+    Raises ValueError with actionable context on failure.
     """
-    x1, y1, x2, y2 = box
-    crop = frame_bgr[y1:y2, x1:x2]
-    if crop is None or crop.size == 0:
-        raise ValueError("Empty crop for ReID embedding")
+    if frame_bgr is None or frame_bgr.size == 0:
+        raise ValueError("frame_bgr is empty")
 
-    # torchreid extractor expects RGB images
-    rgb = crop[:, :, ::-1]
+    h, w = frame_bgr.shape[:2]
+    x1, y1, x2, y2 = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
+
+    # Clamp to image bounds
+    x1 = max(0, min(x1, w - 1))
+    x2 = max(0, min(x2, w))
+    y1 = max(0, min(y1, h - 1))
+    y2 = max(0, min(y2, h))
+
+    # Validate box after clamp
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError(f"Invalid crop box after clamp: box={box} clamped={(x1,y1,x2,y2)} frame_wh={(w,h)}")
+
+    crop = frame_bgr[y1:y2, x1:x2]
+    if crop.size == 0:
+        raise ValueError(f"Empty crop: clamped={(x1,y1,x2,y2)} frame_wh={(w,h)}")
+
+    # BGR -> RGB, make contiguous (some libs are picky)
+    rgb = np.ascontiguousarray(crop[:, :, ::-1])
 
     extractor = _get_reid_extractor(model_name)
-    feat = extractor([rgb])[0]  # shape (D,)
-    feat = feat.astype("float32")
+
+    try:
+        out = extractor([rgb])
+    except Exception as e:
+        raise ValueError(f"ReID extractor failed: {type(e).__name__}: {e}")
+
+    if out is None or len(out) == 0:
+        raise ValueError("ReID extractor returned empty output")
+
+    feat = out[0]
+    if feat is None:
+        raise ValueError("ReID extractor returned None feature")
+    feat = np.asarray(feat, dtype="float32")
+    if feat.ndim != 1 or feat.size == 0:
+        raise ValueError(f"Bad feature shape: shape={feat.shape}")
 
     # L2 normalize
     norm = float(np.linalg.norm(feat))
     if norm > 0:
         feat /= norm
     return feat
+
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:

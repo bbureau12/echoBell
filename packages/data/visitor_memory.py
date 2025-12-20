@@ -267,7 +267,6 @@ def compute_prior_weight(
         return 0.0
     return min(w, float(max_weight))
 # packages/data/visitor_memory.py
-from __future__ import annotations
 import json, sqlite3
 from typing import Any, Optional
 
