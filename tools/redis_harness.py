@@ -1,20 +1,27 @@
 from dataclasses import dataclass
 import os
+import sys
 import redis
 
+# Add project root to path
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
-@dataclass(frozen=True)
-class RedisConfig:
-    host: str = os.getenv("REDIS_HOST", "localhost")
-    port: int = int(os.getenv("REDIS_PORT", "6379"))
+from apps.app import AppConfig
 
 
-def test_redis(config: RedisConfig) -> None:
-    print(f"[test] connecting to redis at {config.host}:{config.port}")
+def test_redis(config: AppConfig) -> None:
+    print(f"[test] connecting to redis at {config.redis_host}:{config.redis_port}")
+    print(f"[test] redis_enabled: {config.redis_enabled}")
+
+    if not config.redis_enabled:
+        print("[test] redis is disabled in config")
+        return
 
     r = redis.Redis(
-        host=config.host,
-        port=config.port,
+        host=config.redis_host,
+        port=config.redis_port,
         socket_connect_timeout=2,
         socket_timeout=2,
     )
@@ -37,5 +44,7 @@ def test_redis(config: RedisConfig) -> None:
 
 
 if __name__ == "__main__":
-    cfg = RedisConfig()
+    # Load config from config.json or use defaults
+    config_path = os.path.join(ROOT, "config.json")
+    cfg = AppConfig.from_json_or_defaults(config_path)
     test_redis(cfg)
