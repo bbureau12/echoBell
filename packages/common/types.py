@@ -523,3 +523,18 @@ class RuleMatch:
     #
     # Indicates *where* this rule was allowed to fire.
     scope_any_of: str
+
+@dataclass(frozen=True)
+class CameraCapabilities:
+    allow_landscape: bool
+    allow_vehicle_detail: bool
+    allow_facial_detail: bool
+
+@dataclass(frozen=True)
+class Camera:
+    id: int
+    name: str
+    location_id: Optional[int]
+    description: Optional[str]
+    capability_level_id: int
+    capability: CameraCapabilities

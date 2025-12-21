@@ -91,7 +91,7 @@ def main() -> int:
             sys.argv.extend([
                 "--db", "data/doorbell.db",
                 "--enroll", "data/police/sherriff.jpg",
-                "--probe", "data/police/sherriff.jpg",
+                "--probe", "data/police/sherriff2.jpeg",
                 "--min-sim", "0.80",
             ])
     ap = argparse.ArgumentParser()
