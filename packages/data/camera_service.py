@@ -39,7 +39,8 @@ class CameraRepository:
     def get_by_id(self, camera_id: int) -> Optional[Camera]:
         row = self.conn.execute(
             """
-            SELECT id, name, location_id, description, resolution_level_id
+            SELECT id, name, location_id, description, capability_level_id,
+                   hostname, ip_address, port, protocol, endpoint, stream_url, auth_profile_id
             FROM camera
             WHERE id = ?
             """,
@@ -49,7 +50,8 @@ class CameraRepository:
         if not row:
             return None
 
-        cam_id, name, location_id, description, level_id = row
+        (cam_id, name, location_id, description, level_id,
+         hostname, ip_address, port, protocol, endpoint, stream_url, auth_profile_id) = row
         level_id = int(level_id)
 
         return Camera(
@@ -58,20 +60,29 @@ class CameraRepository:
             location_id=location_id if location_id is None else int(location_id),
             description=description,
             capability_level_id=level_id,
-            capabilities=capabilities_from_level(level_id),
+            capability=capabilities_from_level(level_id),
+            hostname=hostname,
+            ip_address=ip_address,
+            port=port if port is None else int(port),
+            protocol=protocol,
+            endpoint=endpoint,
+            stream_url=stream_url,
+            auth_profile_id=auth_profile_id if auth_profile_id is None else int(auth_profile_id),
         )
 
     def list_all(self) -> list[Camera]:
         rows = self.conn.execute(
             """
-            SELECT id, name, location_id, description, resolution_level_id
+            SELECT id, name, location_id, description, capability_level_id,
+                   hostname, ip_address, port, protocol, endpoint, stream_url, auth_profile_id
             FROM camera
             ORDER BY id
             """
         ).fetchall()
 
         cams: list[Camera] = []
-        for cam_id, name, location_id, description, level_id in rows:
+        for (cam_id, name, location_id, description, level_id,
+             hostname, ip_address, port, protocol, endpoint, stream_url, auth_profile_id) in rows:
             level_id = int(level_id)
             cams.append(
                 Camera(
@@ -80,7 +91,14 @@ class CameraRepository:
                     location_id=location_id if location_id is None else int(location_id),
                     description=description,
                     capability_level_id=level_id,
-                    capabilities=capabilities_from_level(level_id),
+                    capability=capabilities_from_level(level_id),
+                    hostname=hostname,
+                    ip_address=ip_address,
+                    port=port if port is None else int(port),
+                    protocol=protocol,
+                    endpoint=endpoint,
+                    stream_url=stream_url,
+                    auth_profile_id=auth_profile_id if auth_profile_id is None else int(auth_profile_id),
                 )
             )
         return cams

@@ -2,5 +2,8 @@
   "db_path": "data/doorbell.db",
   "redis_host": "localhost",
   "redis_port": 6379,
-  "redis_enabled": true
+  "redis_enabled": true,
+  "cache_short_minutes": 5,
+  "cache_medium_minutes": 90,
+  "cache_long_minutes": 1440
 }

@@ -538,3 +538,12 @@ class Camera:
     description: Optional[str]
     capability_level_id: int
     capability: CameraCapabilities
+    
+    # Network connection details
+    hostname: Optional[str] = None
+    ip_address: Optional[str] = None
+    port: Optional[int] = None
+    protocol: Optional[str] = None  # "rtsp", "http", "https"
+    endpoint: Optional[str] = None  # optional path
+    stream_url: Optional[str] = None  # full constructed URL or override
+    auth_profile_id: Optional[int] = None

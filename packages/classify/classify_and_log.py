@@ -48,7 +48,7 @@ def classify_and_log(
     event_id = event_id or str(uuid.uuid4())
 
     # Choose actor first so we can log REID info even if we later skip intent updates.
-    actor = _choose_actor(vision)  # return (visitor_id, object_id, similarity, kind)
+    actor = _choose_actor_visitor_id(vision)  # return (visitor_id, object_id, similarity, kind)
     if not actor:
         classified = classify(text=text, vision=vision, db_path=db_path)
         return classified, event_id

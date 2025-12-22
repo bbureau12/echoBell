@@ -2,11 +2,13 @@
 from collections import defaultdict
 import sqlite3
 import os, time
-from typing import List
+from typing import List, Optional
 import numpy as np
 from ultralytics import YOLO
 import cv2
 import sys, os
+
+from packages.data.cache.cache import Cache
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from packages.common.types import Detection, Evidence, VisionResult, SceneObject
 from .ocr import extract_ocr_tokens_by_object
@@ -221,6 +223,7 @@ def snapshot_and_detect(
     camera_id: str | None = None,
     debug: bool = True,
     enable_ocr: bool = True,
+    cache: Optional[Cache] = None
 ) -> VisionResult:
     import cv2, time, sqlite3
     from packages.common.types import Detection, VisionResult, Evidence, SceneObject
@@ -365,6 +368,8 @@ def snapshot_and_detect(
                 person_object_id=obj.object_id,
                 person_box=(x1, y1, x2, y2),
                 now_ts=now_ts,
+                camera_id=int(camera_id) if camera_id is not None else None,
+                cache = cache
             )
 
             # Convenience props for the pipeline after intent.classify()

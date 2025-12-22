@@ -302,13 +302,13 @@ def _update_visit_counters(prev_last_seen_ts: int, now_ts: int, prev_7d: int, pr
     return new_7d, new_30d
 
 
-def _insert_embedding(conn, visitor_id: str, model_name: str, emb: np.ndarray, now_ts: int, source_event_id: Optional[str] = None):
+def _insert_embedding(conn, visitor_id: str, model_name: str, emb: np.ndarray, now_ts: int, source_event_id: Optional[str] = None, camera_id: Optional[int] = None):
     conn.execute(
         """
         INSERT INTO visitor_embeddings (
             embedding_id, visitor_id, model_name, embedding_dim, embedding_blob,
-            source_event_id, created_ts, quality_score
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            source_event_id, created_ts, quality_score, camera_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             uuid4().hex,
@@ -319,6 +319,7 @@ def _insert_embedding(conn, visitor_id: str, model_name: str, emb: np.ndarray, n
             source_event_id,
             int(now_ts),
             1.0,
+            camera_id,
         ),
     )
 
@@ -331,8 +332,17 @@ def try_match_trusted(*args, **kwargs) -> Optional[VisitorMatch]:
     # Stub for later: use face recognition for enrolled profiles OR high-tier reid
     return None
 
+from packages.data.cache.cache import Cache
+from packages.data.cache.reid_cache import ReidHit, get_cached_cam_hit, set_cached_last_seen
+def try_match_known(conn, emb: np.ndarray, *, model_name: str, now_ts: int, camera_id: Optional[int] = None, cache: Optional[Cache] = None) -> Optional[VisitorMatch]:
+    hit = get_cached_cam_hit(cache, camera_id = camera_id, model_name = model_name)
+    if hit and hit.sim >= KNOWN_MATCH_THRESHOLD:
+        return VisitorMatch(
+            kind="known",
+            visitor_id=hit.visitor_id,
+            similarity=hit.sim,
+        )
 
-def try_match_known(conn, emb: np.ndarray, *, model_name: str) -> Optional[VisitorMatch]:
     candidates = _fetch_recent_visitor_candidates(conn, model_name=model_name)
     if not candidates:
         return None
@@ -358,8 +368,8 @@ def try_match_known(conn, emb: np.ndarray, *, model_name: str) -> Optional[Visit
     row = _fetch_known_visitor_row(conn, best_id)
     if not row:
         return None
-
-    return VisitorMatch(
+    
+    result = VisitorMatch(
         kind="known",
         visitor_id=best_id,
         similarity=float(best_sim),
@@ -369,6 +379,9 @@ def try_match_known(conn, emb: np.ndarray, *, model_name: str) -> Optional[Visit
         intent_last=row.get("intent_last"),
         intent_last_ts=row.get("intent_last_ts"),
     )
+    set_cached_last_seen(cache, hit=ReidHit(visitor_id=best_id, sim=best_sim, model_name=model_name, camera_id=camera_id, ts=now_ts))
+
+    return result
 
 
 def create_new_visitor(conn, *, now_ts: int) -> str:
@@ -439,6 +452,8 @@ def process_person_and_emit_evidence(
     person_box: Tuple[int, int, int, int],
     now_ts: int,
     model_name: str = "osnet_x0_5",
+    camera_id: Optional[int] = None,
+    cache: Optional[Cache] = None,
 ) -> VisitorMatch:
     """
     - quality gate
@@ -470,21 +485,21 @@ def process_person_and_emit_evidence(
             return trusted
 
     # Known visitor matching
-    known = try_match_known(conn, emb, model_name=model_name)
+    known = try_match_known(conn, emb, model_name=model_name, now_ts=now_ts, camera_id=camera_id, cache=cache)
     if known:
         # update counters + last seen
         updated = update_known_visitor_on_match(conn, known.visitor_id, now_ts)
         updated.similarity = known.similarity
 
         # store another embedding sample (helps robustness)
-        _insert_embedding(conn, updated.visitor_id, model_name, emb, now_ts)
+        _insert_embedding(conn, updated.visitor_id, model_name, emb, now_ts, camera_id=camera_id)
 
         emit_match_evidence(vr, person_object_id, updated)
         return updated
 
     # New visitor
     visitor_id = create_new_visitor(conn, now_ts=now_ts)
-    _insert_embedding(conn, visitor_id, model_name, emb, now_ts)
+    _insert_embedding(conn, visitor_id, model_name, emb, now_ts, camera_id=camera_id)
 
     new_match = VisitorMatch(kind="new", visitor_id=visitor_id)
     emit_match_evidence(vr, person_object_id, new_match)
