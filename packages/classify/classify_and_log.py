@@ -55,6 +55,9 @@ def classify_and_log(
     event_id: str | None = None,
     now_ts: int | None = None,
     lock_conf_threshold: float = 0.85,
+    snapshot_service = None,
+    frame_bgr = None,
+    camera_id: int | None = None,
 ) -> tuple[Classified, str]:
     now_ts = int(now_ts or time.time())
     event_id = event_id or str(uuid.uuid4())
@@ -87,6 +90,31 @@ def classify_and_log(
                 "trace": classified.trace,
             },
         )
+
+        # Save snapshot if needed (after event is created so we have event_id)
+        if snapshot_service and camera_id is not None and frame_bgr is not None:
+            from packages.data.snapshot_service import SnapshotMetadata
+            
+            # Determine if we should save snapshot
+            is_new_visitor = (kind == "new")
+            should_save = snapshot_service.should_save_snapshot(
+                conn=conn,
+                visitor_id=visitor_id,
+                camera_id=camera_id,
+                now_ts=now_ts,
+                is_new_visitor=is_new_visitor,
+            )
+            
+            if should_save:
+                snapshot_service.save_snapshot(
+                    conn=conn,
+                    image=frame_bgr,
+                    metadata=SnapshotMetadata(
+                        camera_id=camera_id,
+                        timestamp=now_ts,
+                        visitor_event_id=event_id,
+                    ),
+                )
 
         if classified.conf >= lock_conf_threshold:
             update_visitor_event_intent(

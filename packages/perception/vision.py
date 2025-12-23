@@ -223,7 +223,7 @@ def snapshot_and_detect(
     camera_id: str | None = None,
     debug: bool = True,
     enable_ocr: bool = True,
-    cache: Optional[Cache] = None
+    cache: Optional[Cache] = None,
 ) -> VisionResult:
     import cv2, time, sqlite3
     from packages.common.types import Detection, VisionResult, Evidence, SceneObject
@@ -369,7 +369,7 @@ def snapshot_and_detect(
                 person_box=(x1, y1, x2, y2),
                 now_ts=now_ts,
                 camera_id=int(camera_id) if camera_id is not None else None,
-                cache = cache
+                cache=cache,
             )
 
             # Convenience props for the pipeline after intent.classify()

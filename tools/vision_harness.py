@@ -3,6 +3,9 @@ import sys
 import sqlite3
 import argparse
 import glob
+import uuid
+import cv2
+import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -14,6 +17,9 @@ from packages.classify.intent import classify
 
 # Import AppConfig and build_context for cache setup
 from apps.app import AppConfig, build_context
+
+# Import SnapshotService for saving visitor snapshots
+from packages.data.snapshot_service import SnapshotService
 
 
 VALID_EXT = (".jpg", ".jpeg", ".png")
@@ -79,6 +85,13 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
     else:
         print("[CACHE] No cache available")
     
+    # Create snapshot service for saving visitor snapshots
+    snapshot_service = SnapshotService(
+        output_dir=os.path.join(ROOT, "data", "img_log"),
+        max_size=1920
+    )
+    print(f"[SNAPSHOT] Service initialized: {snapshot_service.output_dir}")
+    
     # Clean up any annotated files before running tests
     cleanup_annotated_files(dataset_root)
 
@@ -88,16 +101,30 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
         print("=" * 80)
         print(f"[TEST CASE] folder={folder} file={file_path}")
 
-        # 1) Run vision with cache
-        vr = snapshot_and_detect(db_path, file_path, debug=debug, cache=cache)
+        # Load the frame for snapshot service
+        frame_bgr = cv2.imread(file_path)
+        camera_id = 1  # Test camera
+        now_ts = int(time.time())
 
-        # 2) Run intent classification (just vision; text="")
+        # 1) Run vision with cache
+        vr = snapshot_and_detect(
+            db_path, 
+            file_path, 
+            camera_id=str(camera_id), 
+            debug=debug, 
+            cache=cache,
+        )
+
+        # 2) Run intent classification with snapshot service
         classified, event_id = classify_and_log(
             db_path=db_path,
             vision=vr,
             text="",
             event_id=None,
             lock_conf_threshold=0.85,
+            snapshot_service=snapshot_service,
+            frame_bgr=frame_bgr,
+            camera_id=camera_id,
         )
         print("intent:", classified.intent, classified.conf, "event:", event_id)
 
