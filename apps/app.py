@@ -76,7 +76,7 @@ def build_context(config: AppConfig) -> AppContext:
     camera_service = CameraService(
         cache=cache,
         registry=None,     # or TEST_REGISTRY for harnesses
-        ttl_s=config.cache_medium_minutes * 60, # 2 hours
+        cache_ttl_s=config.cache_long_minutes * 60, # 24 hours default
     )
 
 

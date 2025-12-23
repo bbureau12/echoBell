@@ -337,6 +337,7 @@ from packages.data.cache.reid_cache import ReidHit, get_cached_cam_hit, set_cach
 def try_match_known(conn, emb: np.ndarray, *, model_name: str, now_ts: int, camera_id: Optional[int] = None, cache: Optional[Cache] = None) -> Optional[VisitorMatch]:
     hit = get_cached_cam_hit(cache, camera_id = camera_id, model_name = model_name)
     if hit and hit.sim >= KNOWN_MATCH_THRESHOLD:
+        print("found in cache")
         return VisitorMatch(
             kind="known",
             visitor_id=hit.visitor_id,

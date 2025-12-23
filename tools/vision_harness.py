@@ -12,6 +12,9 @@ from packages.classify.classify_and_log import classify_and_log
 from packages.perception.vision import snapshot_and_detect
 from packages.classify.intent import classify
 
+# Import AppConfig and build_context for cache setup
+from apps.app import AppConfig, build_context
+
 
 VALID_EXT = (".jpg", ".jpeg", ".png")
 
@@ -65,6 +68,17 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
     print(f"\n[DATASET] scanning: {dataset_root}")
     print(f"[DATASET] using DB: {db_path}\n")
     
+    # Set up cache using the same config as app.py
+    config_path = os.path.join(ROOT, "config.json")
+    config = AppConfig.from_json_or_defaults(config_path)
+    ctx = build_context(config)
+    cache = ctx.cache
+    
+    if cache:
+        print(f"[CACHE] Using cache: {type(cache).__name__}")
+    else:
+        print("[CACHE] No cache available")
+    
     # Clean up any annotated files before running tests
     cleanup_annotated_files(dataset_root)
 
@@ -74,8 +88,8 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
         print("=" * 80)
         print(f"[TEST CASE] folder={folder} file={file_path}")
 
-        # 1) Run vision
-        vr = snapshot_and_detect(db_path, file_path, debug=debug)
+        # 1) Run vision with cache
+        vr = snapshot_and_detect(db_path, file_path, debug=debug, cache=cache)
 
         # 2) Run intent classification (just vision; text="")
         classified, event_id = classify_and_log(

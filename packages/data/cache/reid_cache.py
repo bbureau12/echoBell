@@ -65,7 +65,9 @@ def set_cached_last_seen(cache: Optional[Cache], hit: ReidHit, *, ttl_s: int = 3
     )
 
 def get_cached_last_seen(cache: Optional[Cache], *, visitor_id: str, model_name: str, max_age_s: int = 300) -> Optional[ReidHit]:
+    print("get_cached_last_seen called")
     if not cache:
+        print("no cache")
         return None
     raw = cache.get(_visitor_key(visitor_id))
     if not raw:
@@ -85,6 +87,7 @@ def get_cached_last_seen(cache: Optional[Cache], *, visitor_id: str, model_name:
             camera_id=int(data["camera_id"]),
             model_name=str(data["model_name"]),
         )
+        print("cache pulled")
     except Exception:
         cache.delete(_visitor_key(visitor_id))
         return None
