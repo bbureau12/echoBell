@@ -5,5 +5,9 @@
   "redis_enabled": true,
   "cache_short_minutes": 5,
   "cache_medium_minutes": 90,
-  "cache_long_minutes": 1440
+  "cache_long_minutes": 1440,
+  "retention": {
+    "save_visitor_snapshot": true,
+    "gap_between_visits_seconds": 3600
+  }
 }

@@ -6,6 +6,7 @@ import redis
 import json
 
 from packages.data.camera_service import CameraService
+from packages.common.config_models import RetentionSettings
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -21,13 +22,24 @@ class AppConfig:
     cache_short_minutes: int = 5
     cache_medium_minutes: int = 90
     cache_long_minutes: int = 1440
+    retention: RetentionSettings = None
+
+    def __post_init__(self):
+        # Ensure retention is set to defaults if None
+        if self.retention is None:
+            object.__setattr__(self, 'retention', RetentionSettings())
 
     @classmethod
     def from_json(cls, json_path: str) -> "AppConfig":
         """Load configuration from a JSON file."""
         with open(json_path, "r") as f:
             data = json.load(f)
-        return cls(**data)
+        
+        # Handle retention settings separately
+        retention_data = data.pop("retention", {})
+        retention = RetentionSettings(**retention_data) if retention_data else RetentionSettings()
+        
+        return cls(**data, retention=retention)
 
     @classmethod
     def from_json_or_defaults(cls, json_path: Optional[str] = None) -> "AppConfig":
@@ -46,7 +58,8 @@ class AppConfig:
             redis_enabled=True,
             cache_short_minutes=5,
             cache_medium_minutes=90,
-            cache_long_minutes=1440
+            cache_long_minutes=1440,
+            retention=RetentionSettings()
         )
 
 @dataclass

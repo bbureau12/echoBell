@@ -125,6 +125,7 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
             snapshot_service=snapshot_service,
             frame_bgr=frame_bgr,
             camera_id=camera_id,
+            retention=config.retention,
         )
         print("intent:", classified.intent, classified.conf, "event:", event_id)
 

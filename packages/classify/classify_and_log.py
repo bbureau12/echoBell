@@ -8,6 +8,7 @@ from typing import Optional
 from packages.common.types import VisionResult
 from packages.classify.intent import classify, Classified
 from packages.data.visitor_memory import create_visitor_event, update_visitor_event_intent
+from packages.common.config_models import RetentionSettings
 
 def _choose_actor_visitor_id(vr: VisionResult) -> Optional[tuple[str, str, float, str]]:
     """
@@ -58,7 +59,18 @@ def classify_and_log(
     snapshot_service = None,
     frame_bgr = None,
     camera_id: int | None = None,
+    retention: RetentionSettings | None = None,
 ) -> tuple[Classified, str]:
+    """
+    Classify intent and log visitor event.
+    
+    Args:
+        retention: RetentionSettings for snapshot saving behavior. 
+                   If None, uses defaults (save_visitor_snapshot=True, gap_between_visits_seconds=3600)
+    """
+    if retention is None:
+        retention = RetentionSettings()
+    
     now_ts = int(now_ts or time.time())
     event_id = event_id or str(uuid.uuid4())
 
@@ -92,7 +104,7 @@ def classify_and_log(
         )
 
         # Save snapshot if needed (after event is created so we have event_id)
-        if snapshot_service and camera_id is not None and frame_bgr is not None:
+        if retention.save_visitor_snapshot and snapshot_service and camera_id is not None and frame_bgr is not None:
             from packages.data.snapshot_service import SnapshotMetadata
             
             # Determine if we should save snapshot
@@ -103,6 +115,7 @@ def classify_and_log(
                 camera_id=camera_id,
                 now_ts=now_ts,
                 is_new_visitor=is_new_visitor,
+                min_interval_seconds=retention.gap_between_visits_seconds,
             )
             
             if should_save:
