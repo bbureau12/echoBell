@@ -276,18 +276,22 @@ def create_visitor_event(
     event_id: str,
     visitor_id: str,
     detected_ts_iso: str,   # e.g. "2025-12-18 19:22:11"
+    intent: str | None = None,
+    intent_conf: float | None = None,
     evidence: dict[str, Any] | None = None,
 ) -> None:
     conn.execute(
         """
         INSERT OR REPLACE INTO visitor_events (
-            event_id, visitor_id, detected_ts, evidence_json
-        ) VALUES (?, ?, ?, ?)
+            event_id, visitor_id, detected_ts, intent_inferred, intent_confidence, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?)
         """,
         (
             event_id,
             visitor_id,
             detected_ts_iso,
+            intent,
+            intent_conf,
             json.dumps(evidence, separators=(",", ":"), ensure_ascii=False) if evidence else None,
         ),
     )

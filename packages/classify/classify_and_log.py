@@ -35,7 +35,7 @@ def _choose_actor_visitor_id(vr: VisionResult) -> Optional[tuple[str, str, float
             best_sim = sim
             best_conf = conf
             best_vid = str(vid)
-            best_object_id = obj.id
+            best_object_id = obj.object_id
             best_kind = str(kind)
 
     if best_vid is None:
@@ -75,6 +75,8 @@ def classify_and_log(
             event_id=event_id,
             visitor_id=visitor_id,
             detected_ts_iso=_iso_now(now_ts),
+            intent=classified.intent,
+            intent_conf=classified.conf,
             evidence={
                 "snapshot_path": getattr(vision, "snapshot_path", None),
                 "actor_object_id": person_object_id,
