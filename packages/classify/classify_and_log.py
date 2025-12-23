@@ -9,10 +9,16 @@ from packages.common.types import VisionResult
 from packages.classify.intent import classify, Classified
 from packages.data.visitor_memory import create_visitor_event, update_visitor_event_intent
 
-def _choose_actor_visitor_id(vr: VisionResult) -> Optional[str]:
+def _choose_actor_visitor_id(vr: VisionResult) -> Optional[tuple[str, str, float, str]]:
+    """
+    Find the best visitor match from vision results.
+    Returns (visitor_id, object_id, similarity, kind) or None.
+    """
     best_vid = None
+    best_object_id = None
     best_sim = -1.0
     best_conf = -1.0
+    best_kind = None
 
     for obj in (vr.objects or []):
         if (obj.label or "").lower() != "person":
@@ -23,13 +29,19 @@ def _choose_actor_visitor_id(vr: VisionResult) -> Optional[str]:
 
         sim = float(obj.props.get("visitor_similarity") or 0.0)
         conf = float(obj.props.get("conf") or 0.0)
+        kind = obj.props.get("visitor_kind", "unknown")
 
         if sim > best_sim or (sim == best_sim and conf > best_conf):
             best_sim = sim
             best_conf = conf
             best_vid = str(vid)
+            best_object_id = obj.id
+            best_kind = str(kind)
 
-    return best_vid
+    if best_vid is None:
+        return None
+    
+    return (best_vid, best_object_id, best_sim, best_kind)
 
 def _iso_now(now_ts: int) -> str:
     # SQLite DATETIME friendly "YYYY-MM-DD HH:MM:SS"
