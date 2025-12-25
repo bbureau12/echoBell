@@ -50,6 +50,8 @@ class VisitorMatch:
     visit_count_7d: int = 0
     visit_count_30d: int = 0
     visit_count_total: int = 0
+    trusted_pending: bool = False
+    trusted_verified: bool = False
 
     # Optional historical hints
     intent_last: Optional[str] = None
@@ -342,6 +344,8 @@ def try_match_known(conn, emb: np.ndarray, *, model_name: str, now_ts: int, came
             kind="known",
             visitor_id=hit.visitor_id,
             similarity=hit.sim,
+            trusted_pending=hit.trusted_pending,
+            trusted_verified=hit.trusted_verified
         )
 
     candidates = _fetch_recent_visitor_candidates(conn, model_name=model_name)
@@ -380,7 +384,7 @@ def try_match_known(conn, emb: np.ndarray, *, model_name: str, now_ts: int, came
         intent_last=row.get("intent_last"),
         intent_last_ts=row.get("intent_last_ts"),
     )
-    set_cached_last_seen(cache, hit=ReidHit(visitor_id=best_id, sim=best_sim, model_name=model_name, camera_id=camera_id, ts=now_ts))
+    set_cached_last_seen(cache, hit=ReidHit(visitor_id=best_id, sim=best_sim, trusted_pending=result.trusted_pending, trusted_verified=result.trusted_verified, model_name=model_name, camera_id=camera_id, ts=now_ts))
 
     return result
 

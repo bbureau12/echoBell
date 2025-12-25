@@ -221,3 +221,4 @@ data/*
 models/
 # venv
 .venv-vision/
+*.zip

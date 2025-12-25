@@ -13,6 +13,8 @@ class ReidHit:
     ts: int
     camera_id: int
     model_name: str
+    trusted_pending: bool = False
+    trusted_verified: bool = False
 
 def _cam_key(camera_id: int) -> str:
     return f"reid:cam:{camera_id}:best"
