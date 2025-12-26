@@ -8,11 +8,16 @@ import json
 import math
 import time
 from uuid import uuid4
+import sqlite3
 
 import cv2
 import numpy as np
 
-
+from packages.common.types import Camera
+from packages.data.cache.cache import Cache
+from packages.data.cache.reid_cache import ReidHit, get_cached_cam_hit, set_cached_last_seen
+from packages.data.camera_service import CameraService
+from packages.perception.trusted_embeddings.trusted_face_matching import try_match_trusted
 # -----------------------------
 # Config
 # -----------------------------
@@ -52,6 +57,10 @@ class VisitorMatch:
     visit_count_total: int = 0
     trusted_pending: bool = False
     trusted_verified: bool = False
+    
+    # Fields for trusted face matches
+    trusted_id: Optional[int] = None
+    trusted_label: Optional[str] = None
 
     # Optional historical hints
     intent_last: Optional[str] = None
@@ -225,7 +234,15 @@ def emit_match_evidence(vr, obj_id: int, match: VisitorMatch) -> None:
     if match.kind == "skipped":
         return
 
-    if match.kind == "known":
+    if match.kind == "trusted":
+        _append_obj_evidence(vr, obj_id, "visitor", "visitor.trusted", "true", max(0.01, match.similarity))
+        _append_obj_evidence(vr, obj_id, "visitor", "visitor.similarity", f"{match.similarity:.3f}", 1.0)
+        if match.trusted_id is not None:
+            _append_obj_evidence(vr, obj_id, "visitor", "visitor.trusted_id", str(match.trusted_id), 1.0)
+        if match.trusted_label:
+            _append_obj_evidence(vr, obj_id, "visitor", "visitor.trusted_label", match.trusted_label, 1.0)
+
+    elif match.kind == "known":
         _append_obj_evidence(vr, obj_id, "visitor", "visitor.known", "true", max(0.01, match.similarity))
         _append_obj_evidence(vr, obj_id, "visitor", "visitor.similarity", f"{match.similarity:.3f}", 1.0)
         _append_obj_evidence(vr, obj_id, "visitor", "visitor.visit_count_total", str(match.visit_count_total), 1.0)
@@ -326,16 +343,6 @@ def _insert_embedding(conn, visitor_id: str, model_name: str, emb: np.ndarray, n
     )
 
 
-# -----------------------------
-# Matching + logging
-# -----------------------------
-
-def try_match_trusted(*args, **kwargs) -> Optional[VisitorMatch]:
-    # Stub for later: use face recognition for enrolled profiles OR high-tier reid
-    return None
-
-from packages.data.cache.cache import Cache
-from packages.data.cache.reid_cache import ReidHit, get_cached_cam_hit, set_cached_last_seen
 def try_match_known(conn, emb: np.ndarray, *, model_name: str, now_ts: int, camera_id: Optional[int] = None, cache: Optional[Cache] = None) -> Optional[VisitorMatch]:
     hit = get_cached_cam_hit(cache, camera_id = camera_id, model_name = model_name)
     if hit and hit.sim >= KNOWN_MATCH_THRESHOLD:
@@ -459,6 +466,7 @@ def process_person_and_emit_evidence(
     model_name: str = "osnet_x0_5",
     camera_id: Optional[int] = None,
     cache: Optional[Cache] = None,
+    camera_service: Optional[CameraService] = None,
 ) -> VisitorMatch:
     """
     - quality gate
@@ -483,11 +491,23 @@ def process_person_and_emit_evidence(
 
 
     # Trusted (later)
-    if quality.tier == "trusted":
-        trusted = try_match_trusted(conn=conn, emb=emb, model_name=model_name)
-        if trusted:
-            emit_match_evidence(vr, person_object_id, trusted)
-            return trusted
+    if quality.tier == "trusted" and camera_id and camera_service:
+        camera = camera_service.get_camera(conn, camera_id)
+        if camera and camera.capability and camera.capability.allow_facial_detail:
+            trusted = try_match_trusted(
+                conn,
+                camera_service,
+                camera_id=camera_id,
+                cache=cache,
+                frame_bgr=frame_bgr,
+                person_box=person_box,
+                model_pack="buffalo_l",  # Can be made configurable later
+                threshold=0.60,
+                margin=0.05,
+            )
+            if trusted:
+                emit_match_evidence(vr, person_object_id, trusted)
+                return trusted
 
     # Known visitor matching
     known = try_match_known(conn, emb, model_name=model_name, now_ts=now_ts, camera_id=camera_id, cache=cache)

@@ -106,13 +106,14 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
         camera_id = 1  # Test camera
         now_ts = int(time.time())
 
-        # 1) Run vision with cache
+        # 1) Run vision with cache and camera_service
         vr = snapshot_and_detect(
             db_path, 
             file_path, 
             camera_id=str(camera_id), 
             debug=debug, 
             cache=cache,
+            camera_service=ctx.camera_service,
         )
 
         # 2) Run intent classification with snapshot service

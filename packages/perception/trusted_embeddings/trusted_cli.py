@@ -11,6 +11,7 @@ import os
 from collections import Counter
 from typing import Optional, Tuple, List
 from insightface.app import FaceAnalysis
+from scipy import stats
 
 # ---------- utils ----------
 def now_ts() -> int:
@@ -27,15 +28,20 @@ def l2_normalize_rows(X: np.ndarray) -> np.ndarray:
 
 def scan_trusted_faces(args):
     """Command handler for scanning trusted faces from folders."""
+    stats = Counter()
     conn = get_conn()
     root = Path(args.root).resolve()
+
+    app = FaceAnalysis(name=args.model)
+    app.prepare(ctx_id=-1, det_size=(640, 640))
+    model_name = f"insightface:{args.model}"
+
     
     if not root.exists():
         print(f"Error: Directory does not exist: {root}")
         return
     
-    embedder = FaceEmbedder(model_pack=args.model)
-    model_name = embedder.model_name
+    model_name = args.model
 
     for person_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         person_name = person_dir.name
@@ -50,14 +56,13 @@ def scan_trusted_faces(args):
         for img_path in iter_images(person_dir):
             img = cv2.imread(str(img_path))
             if img is None:
+                stats["unreadable"] += 1
                 continue
 
-            emb, reason = pick_single_good_face(
-                embedder.app, 
-                img,
-                min_score=args.min_score,
-                min_px=args.min_px
-            )
+            emb, reason = pick_single_good_face(app, img, min_score=args.min_score, min_px=args.min_px)
+
+            stats[reason] += 1
+
             if emb is not None:
                 embeddings.append(emb)
 
@@ -99,6 +104,16 @@ def scan_trusted_faces(args):
                 )
 
         print(f"[OK] {person_name}: stored {len(protos)} prototypes from {len(embeddings)} faces")
+        print(f"[{'OK' if len(protos) else 'SKIP'}] {person_name} (trusted_id={trusted_id})")
+        print(f"  images scanned: {stats['ok'] + stats['no_good_face'] + stats['multiple_good_faces'] + stats['unreadable']}")
+        print(f"  ok: {stats['ok']}")
+        if stats["no_good_face"]:
+            print(f"  skipped (no good face): {stats['no_good_face']}")
+        if stats["multiple_good_faces"]:
+            print(f"  skipped (multiple good faces): {stats['multiple_good_faces']}")
+        if stats["unreadable"]:
+            print(f"  unreadable: {stats['unreadable']}")
+
     
     conn.close()
 
@@ -163,57 +178,21 @@ def db_list_trusted_people(conn) -> list[tuple[int, str]]:
     cur.execute("SELECT trusted_id, name FROM trusted_person ORDER BY trusted_id")
     return [(int(r[0]), r[1] or "") for r in cur.fetchall()]
 
-def db_insert_embedding(
-    conn,
-    trusted_id: int,
-    embedding_type: str,
-    model_name: str,
-    emb: np.ndarray,
-    *,
-    camera_id: int | None = None,
-    quality_score: float = 1.0,
-) -> None:
-    blob = emb.astype("float32").tobytes()
-    dim = int(emb.shape[0])
+def db_insert_embedding(conn, *, trusted_id: int, embedding_type: str, model_name: str,
+                       emb: np.ndarray, camera_id: int | None = None, quality_score: float = 1.0) -> None:
+    emb = emb.astype("float32")
+    emb = emb / max(float(np.linalg.norm(emb)), 1e-12)
 
-    cur = conn.cursor()
-    cur.execute(
+    conn.execute(
         """
         INSERT INTO trusted_person_embedding
           (trusted_id, embedding_type, model_name, embedding_dim, embedding_blob, created_ts, quality_score, camera_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (trusted_id, embedding_type, model_name, dim, blob, now_ts(), float(quality_score), camera_id),
+        (trusted_id, embedding_type, model_name, int(emb.shape[0]), emb.tobytes(), now_ts(), float(quality_score), camera_id),
     )
-    conn.commit()
 
 
-# ---------- Face embedder ----------
-class FaceEmbedder:
-    def __init__(self, model_pack: str = "buffalo_l"):
-        self.model_name = f"insightface:{model_pack}"
-        self.app = FaceAnalysis(name=model_pack)
-        self.app.prepare(ctx_id=-1, det_size=(640, 640))  # CPU
-
-    def embed_faces_from_image(self, img: np.ndarray, *, min_score=0.6, min_px=80):
-        """Extract face embeddings from image. Returns list of (embedding, score, bbox) tuples."""
-        faces = self.app.get(img)
-
-        good = []
-        for f in faces:
-            score = float(getattr(f, "det_score", 1.0))
-            x1, y1, x2, y2 = map(int, f.bbox)  # insightface Face has bbox
-            w, h = (x2 - x1), (y2 - y1)
-
-            if score < min_score:
-                continue
-            if w < min_px or h < min_px:
-                continue
-
-            emb = l2_normalize(f.embedding.astype("float32"))
-            good.append((emb, score, (x1, y1, x2, y2)))
-
-        return good
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -241,7 +220,7 @@ def dedupe_embeddings(embs: np.ndarray, *, dup_sim_threshold: float = 0.995) -> 
         kept.append(e)
     return np.stack(kept, axis=0) if kept else embs[:0]
 
-def db_delete_embeddings_for_person(conn, trusted_id: int, *, model_name: str) -> int:
+def db_delete_embeddings_for_person(conn, *, trusted_id: int, model_name: str) -> int:
     cur = conn.execute(
         """
         DELETE FROM trusted_person_embedding
@@ -251,8 +230,8 @@ def db_delete_embeddings_for_person(conn, trusted_id: int, *, model_name: str) -
         """,
         (trusted_id, model_name),
     )
-    conn.commit()
     return cur.rowcount or 0
+
 
 
 def iter_images(folder: Path) -> list[Path]:
@@ -300,9 +279,13 @@ def pick_single_good_face(
 # ---------- Commands ----------
 def cmd_list(_args):
     conn = get_conn()
-    rows = db_list_trusted_people(conn)
-    for tid, name in rows:
-        print(f"{tid}\t{name}")
+    try:
+        rows = conn.execute("SELECT trusted_id, name FROM trusted_person ORDER BY trusted_id").fetchall()
+        for r in rows:
+            print(f"{int(r[0])}\t{r[1] or ''}")
+    finally:
+        conn.close()
+
 
 def cmd_add(args):
     conn = get_conn()
@@ -315,8 +298,7 @@ def cmd_enroll_face(args):
     if img is None:
         raise RuntimeError(f"could not read image: {p}")
 
-    embedder = FaceEmbedder(model_pack=args.model)
-    pairs = embedder.embed_faces_from_image(img)
+    pairs = pick_single_good_face(img)
 
     if not pairs:
         print("no faces found")
@@ -337,7 +319,7 @@ def cmd_enroll_face(args):
         conn,
         trusted_id=args.trusted_id,
         embedding_type="face",
-        model_name=embedder.model_name,
+        model_name=args.model,
         emb=best_emb,
         camera_id=args.camera_id,
         quality_score=best_score,
@@ -375,6 +357,7 @@ def main():
     p.add_argument("--dedupe", action="store_true", help="remove near-duplicate embeddings before clustering")
     p.add_argument("--dedupe-threshold", type=float, default=0.995)
     p.set_defaults(func=scan_trusted_faces)
+    
 
     args = ap.parse_args()
     args.func(args)
