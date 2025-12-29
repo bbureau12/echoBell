@@ -1,8 +1,8 @@
 import sqlite3
 from pathlib import Path
 
-# Connect to database
-db_path = Path("doorbell.db")
+# Connect to database in data folder
+db_path = Path("data/doorbell.db")
 conn = sqlite3.connect(str(db_path))
 
 # Read and execute migration

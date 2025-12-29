@@ -1,0 +1,86 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Trusted CLI - List",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/packages/perception/trusted_embeddings/trusted_cli.py",
+            "args": ["list"],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv-vision/Scripts/python.exe"
+        },
+        {
+            "name": "Python: Trusted CLI - Add Person",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/packages/perception/trusted_embeddings/trusted_cli.py",
+            "args": ["add", "--name", "John Doe"],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv-vision/Scripts/python.exe"
+        },
+        {
+            "name": "Python: Trusted CLI - Scan Folders",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/packages/perception/trusted_embeddings/trusted_cli.py",
+            "args": [
+                "scan-folders",
+                "--root", "data/trusted_faces",
+                "--model", "buffalo_l",
+                "--prototypes", "8",
+                "--min-faces", "3",
+                "--rebuild"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv-vision/Scripts/python.exe"
+        },
+        {
+            "name": "Python: Trusted CLI - Enroll Face",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/packages/perception/trusted_embeddings/trusted_cli.py",
+            "args": [
+                "enroll-face",
+                "--trusted-id", "1",
+                "--image", "data/trusted_faces/person/image.jpg",
+                "--model", "buffalo_l"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv-vision/Scripts/python.exe"
+        },
+        {
+            "name": "Python: Vision Harness",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tools/vision_harness.py",
+            "args": ["--dataset", "data/test"],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv-vision/Scripts/python.exe"
+        },
+        {
+            "name": "Python: Trusted Test Harness",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tools/trusted_test_harness.py",
+            "args": ["--test-root", "data/test", "--debug"],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv-vision/Scripts/python.exe"
+        },
+        {
+            "name": "Python: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv-vision/Scripts/python.exe"
+        }
+    ]
+}

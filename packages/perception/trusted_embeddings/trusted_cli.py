@@ -82,26 +82,30 @@ def scan_trusted_faces(args):
             k=min(args.prototypes, embs.shape[0]),
         )
 
-        with conn:  # SQLite transaction
-            if args.rebuild:
-                deleted = db_delete_embeddings_for_person(
-                    conn,
-                    trusted_id=trusted_id,
-                    model_name=model_name,
-                )
-                if deleted > 0:
-                    print(f"[INFO] {person_name}: deleted {deleted} old embeddings")
+        # Delete old embeddings if rebuild flag is set
+        if args.rebuild:
+            deleted = db_delete_embeddings_for_person(
+                conn,
+                trusted_id=trusted_id,
+                model_name=model_name,
+            )
+            if deleted > 0:
+                print(f"[INFO] {person_name}: deleted {deleted} old embeddings")
 
-            for emb in protos:
-                db_insert_embedding(
-                    conn,
-                    trusted_id=trusted_id,
-                    embedding_type="face",
-                    model_name=model_name,
-                    emb=emb,
-                    camera_id=args.camera_id,
-                    quality_score=1.0,
-                )
+        # Insert new embeddings
+        for emb in protos:
+            db_insert_embedding(
+                conn,
+                trusted_id=trusted_id,
+                embedding_type="face",
+                model_name=model_name,
+                emb=emb,
+                camera_id=args.camera_id,
+                quality_score=1.0,
+            )
+        
+        # Commit the transaction
+        conn.commit()
 
         print(f"[OK] {person_name}: stored {len(protos)} prototypes from {len(embeddings)} faces")
         print(f"[{'OK' if len(protos) else 'SKIP'}] {person_name} (trusted_id={trusted_id})")
@@ -160,8 +164,8 @@ def select_prototypes_farthest_first(embs: np.ndarray, k: int) -> tuple[np.ndarr
 
 # ---------- DB hooks ----------
 def get_conn():
-    # Connect to the doorbell database in the project root
-    db_path = Path(__file__).resolve().parents[3] / "doorbell.db"
+    # Connect to the doorbell database in the data folder
+    db_path = Path(__file__).resolve().parents[3] / "data" / "doorbell.db"
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     return conn
@@ -298,34 +302,31 @@ def cmd_enroll_face(args):
     if img is None:
         raise RuntimeError(f"could not read image: {p}")
 
-    pairs = pick_single_good_face(img)
+    app = FaceAnalysis(name=args.model)
+    app.prepare(ctx_id=-1, det_size=(640, 640))
+    model_name = f"insightface:{args.model}"
 
-    if not pairs:
-        print("no faces found")
+    emb, reason = pick_single_good_face(app, img)
+
+    if emb is None:
+        print(f"No suitable face found: {reason}")
         return
 
-    # If multiple faces, pick the largest/most confident one.
-    # For now, just pick highest det score:
-    best_emb, best_score = max(pairs, key=lambda t: t[1])
-
-    # If you want clustering you need multiple images; this command is single-image.
-    # So either:
-    #  A) store 1 embedding per image (recommended for your folder-scan plan), OR
-    #  B) accept multiple faces in one image (not ideal)
-    #
-    # For the single-image enroll command, store the best face embedding:
+    # For the single-image enroll command, store the face embedding
     conn = get_conn()
     db_insert_embedding(
         conn,
         trusted_id=args.trusted_id,
         embedding_type="face",
-        model_name=args.model,
-        emb=best_emb,
+        model_name=model_name,
+        emb=emb,
         camera_id=args.camera_id,
-        quality_score=best_score,
+        quality_score=1.0,
     )
+    conn.commit()
+    conn.close()
 
-    print(f"stored 1 face embedding for trusted_id={args.trusted_id} model={embedder.model_name} score={best_score:.3f}")
+    print(f"stored 1 face embedding for trusted_id={args.trusted_id} model={model_name}")
 
 def main():
     ap = argparse.ArgumentParser(prog="trusted")
