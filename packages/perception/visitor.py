@@ -17,6 +17,7 @@ from packages.common.types import Camera
 from packages.data.cache.cache import Cache
 from packages.data.cache.reid_cache import ReidHit, get_cached_cam_hit, set_cached_last_seen
 from packages.data.camera_service import CameraService
+from packages.perception.visitor_types import VisitorQuality, VisitorMatch
 from packages.perception.trusted_embeddings.trusted_face_matching import try_match_trusted
 # -----------------------------
 # Config
@@ -36,35 +37,6 @@ INTENT_HALF_LIFE_DAYS = 14.0
 # -----------------------------
 # Types
 # -----------------------------
-
-@dataclass(slots=True)
-class VisitorQuality:
-    ok: bool
-    tier: str               # "skip" | "known" | "trusted"
-    blur_score: float
-    reason: str | None = None
-
-
-@dataclass(slots=True)
-class VisitorMatch:
-    kind: str                 # "trusted" | "known" | "new" | "skipped"
-    visitor_id: Optional[str] = None
-    profile_id: Optional[str] = None
-    profile_label: Optional[str] = None
-    similarity: float = 0.0
-    visit_count_7d: int = 0
-    visit_count_30d: int = 0
-    visit_count_total: int = 0
-    trusted_pending: bool = False
-    trusted_verified: bool = False
-    
-    # Fields for trusted face matches
-    trusted_id: Optional[int] = None
-    trusted_label: Optional[str] = None
-
-    # Optional historical hints
-    intent_last: Optional[str] = None
-    intent_last_ts: Optional[int] = None  # unix seconds
 
 
 # -----------------------------

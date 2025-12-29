@@ -12,7 +12,7 @@ from insightface.app import FaceAnalysis
 
 from packages.data.cache.cache import Cache
 from packages.data.camera_service import CameraService
-from packages.perception.visitor import VisitorMatch
+from packages.perception.visitor_types import VisitorMatch
 
 @dataclass(frozen=True)
 class TrustedFaceIndex:
@@ -189,7 +189,7 @@ def try_match_trusted(
     if not cam or not cam.capability.allow_facial_detail:
         return None
 
-    model_name = f"insightface:{model_pack}"
+    model_name = model_pack  # Use model pack name directly (e.g., "buffalo_l")
 
     # 2) Compute face embedding from this person crop
     app = _get_face_app(model_pack)
