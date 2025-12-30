@@ -47,9 +47,13 @@ Mitigations:
 - Allow future refinement through optional, opt-in classifiers
 
 ## Implementation Notes
-License plate OCR candidates are further constrained by spatial heuristics.
-A valid plate candidate must appear within the lower-middle region of a detected
-vehicle bounding box.
+License plate OCR candidates are constrained using multiple conservative
+heuristics to reduce false positives:
 
-This reduces false positives from vehicle logos, bumper stickers, and background
-text while preserving robustness across vehicle types and regions.
+- Tokens must be associated with a detected vehicle
+- Tokens must appear in the lower-middle region of the vehicle bounding box
+- Tokens must occupy a plausible fraction of the vehicle area
+
+These spatial and size-based constraints reduce false positives from logos,
+decals, and background text while preserving robustness across camera
+distances and mounting configurations.

@@ -12,6 +12,7 @@ class PlateCandidate:
     token_count: int             # Number of tokens that were grouped
     center: tuple = None         # (x, y) center position of plate
     vehicle_bbox: tuple = None   # (x1, y1, x2, y2) bounding box of parent vehicle
+    tokens: list = None          # List of OCRToken objects that make up this candidate
 
 @dataclass
 class PlateModifiers:
@@ -23,6 +24,7 @@ class PlateModifiers:
     boost_good_balance: float = 0.35         # Boost for 2-4 alphas AND 2-4 digits
     boost_weak_balance: float = 0.20         # Boost for any alphas AND any digits
     boost_spatial_position: float = 0.15     # Boost for plates in expected location (center-bottom)
+    boost_size_ratio: float = 0.10           # Boost for plates with appropriate size relative to vehicle
     
     # Confidence caps
     max_confidence: float = 0.95             # Cap to avoid overconfidence
@@ -34,6 +36,9 @@ class PlateModifiers:
     # Spatial position validation (relative to vehicle bbox)
     expected_horizontal_range: tuple = (0.2, 0.8)  # Plate should be in center 60% horizontally (0.2 to 0.8)
     expected_vertical_range: tuple = (0.5, 1.0)    # Plate should be in bottom 50% vertically (0.5 to 1.0)
+    
+    # Size validation (relative to vehicle bbox area)
+    expected_size_ratio_range: tuple = (0.01, 0.05)  # Plate should be 1-5% of vehicle area
     
     # Validation thresholds
     min_component_len: int = 2               # Min length for plate fragment
@@ -185,7 +190,8 @@ def group_plate_tokens(tokens: List, modifiers: PlateModifiers = None, vehicle_b
                 confidence=avg_conf,
                 token_count=len(group),
                 center=avg_center,
-                vehicle_bbox=vehicle_bbox
+                vehicle_bbox=vehicle_bbox,
+                tokens=group  # Store the original tokens for size calculation
             ))
     
     # Deduplicate: If we found both "ABC123" as a single token AND "ABC"+"123" grouped,
@@ -236,7 +242,8 @@ def select_best_plate(candidates: List[PlateCandidate], modifiers: PlateModifier
             confidence=boosted_conf, 
             token_count=c.token_count,
             center=c.center,
-            vehicle_bbox=c.vehicle_bbox
+            vehicle_bbox=c.vehicle_bbox,
+            tokens=c.tokens
         )
     
     # Score each candidate
@@ -274,7 +281,8 @@ def select_best_plate(candidates: List[PlateCandidate], modifiers: PlateModifier
         confidence=boosted_conf, 
         token_count=best.token_count,
         center=best.center,
-        vehicle_bbox=best.vehicle_bbox
+        vehicle_bbox=best.vehicle_bbox,
+        tokens=best.tokens
     )
 
 
@@ -286,6 +294,7 @@ def _boost_confidence_for_pattern(candidate: PlateCandidate, modifiers: PlateMod
     - Standard length (6-7 chars)
     - Good alpha/digit balance  
     - Spatial position (center-bottom of vehicle)
+    - Size ratio (1-5% of vehicle area)
     
     Args:
         candidate: PlateCandidate with text, confidence, and spatial info
@@ -347,6 +356,40 @@ def _boost_confidence_for_pattern(candidate: PlateCandidate, modifiers: PlateMod
         else:
             print(f"[PLATE SPATIAL] ✗ Plate outside expected region "
                   f"(h: {h_min}-{h_max}, v: {v_min}-{v_max}), no spatial boost")
+    
+    # Size ratio boost: plate area should be 1-5% of vehicle area
+    if candidate.tokens and candidate.vehicle_bbox:
+        x1, y1, x2, y2 = candidate.vehicle_bbox
+        vehicle_area = (x2 - x1) * (y2 - y1)
+        
+        # Calculate plate area from token bounding boxes
+        # Use the convex hull approach: find min/max x and y from all token corners
+        all_xs = []
+        all_ys = []
+        for token in candidate.tokens:
+            for corner in token.bbox:
+                all_xs.append(corner[0])
+                all_ys.append(corner[1])
+        
+        if all_xs and all_ys:
+            plate_width = max(all_xs) - min(all_xs)
+            plate_height = max(all_ys) - min(all_ys)
+            plate_area = plate_width * plate_height
+            
+            size_ratio = plate_area / vehicle_area if vehicle_area > 0 else 0
+            
+            # Check if size ratio is in expected range
+            ratio_min, ratio_max = modifiers.expected_size_ratio_range
+            
+            print(f"[PLATE SIZE] plate={candidate.text}, "
+                  f"plate_area={plate_area:.0f}, vehicle_area={vehicle_area:.0f}, "
+                  f"ratio={size_ratio:.4f} (expected: {ratio_min}-{ratio_max})")
+            
+            if ratio_min <= size_ratio <= ratio_max:
+                boost += modifiers.boost_size_ratio
+                print(f"[PLATE SIZE] ✓ Plate size ratio in expected range, adding {modifiers.boost_size_ratio} boost")
+            else:
+                print(f"[PLATE SIZE] ✗ Plate size ratio outside expected range, no size boost")
     
     # Apply boost with diminishing returns for already-high confidence
     # Formula: new_conf = raw + boost * (1 - raw)
