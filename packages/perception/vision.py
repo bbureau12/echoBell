@@ -9,7 +9,7 @@ import cv2
 import sys, os
 
 from packages.data.cache.cache import Cache
-from packages.perception.plate_heurystics import is_plate_candidate
+from packages.perception.plate_heurystics import is_plate_candidate, is_plate_component, group_plate_tokens, select_best_plate
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from packages.common.types import Detection, Evidence, VisionResult, SceneObject
 from .ocr import extract_ocr_tokens_by_object
@@ -396,30 +396,54 @@ def snapshot_and_detect(
             vr.evidence.append(Evidence("vision", "dog_present", "true", 0.9, object_id=None))
 
         # 8) OCR → object-level only (no direct vr.evidence append; we'll flatten once)
+        # Only perform plate OCR if camera has vehicle detail capability
+        allow_plate_ocr = False
+        if enable_ocr and camera_service is not None and camera_id is not None:
+            cam = camera_service.get_camera(conn, int(camera_id))
+            if cam and cam.capability.allow_vehicle_detail:
+                allow_plate_ocr = True
+        
         if enable_ocr and dets:
             ocr_by_obj = extract_ocr_tokens_by_object(frame, dets)
             all_tokens: list[str] = []
 
             for obj in vr.objects:
-                obj_tokens = ocr_by_obj.get(obj.object_id, [])
-                if not obj_tokens:
+                ocr_tokens = ocr_by_obj.get(obj.object_id, [])
+                if not ocr_tokens:
                     continue
-
-                for tok in obj_tokens:
-                    ev = Evidence("ocr", "token", tok, 0.9, object_id=obj.object_id)
-                    if obj.label == "vehicle" and is_plate_candidate(tok):
-                        obj.evidence.append(Evidence("ocr", "plate_text", tok, 0.9, object_id=obj.object_id))
+                
+                # Add all OCR tokens as evidence
+                for tok_obj in ocr_tokens:
+                    tok = tok_obj.text  # Get the actual text string
+                    ev = Evidence("ocr", "token", tok, tok_obj.confidence, object_id=obj.object_id)
+                    obj.evidence.append(ev)
+                    all_tokens.append(tok)
+                
+                # Process vehicle plates: group nearby tokens into complete plates
+                if obj.label == "vehicle" and allow_plate_ocr:
+                    plate_candidates = group_plate_tokens(ocr_tokens)
+                    
+                    # Select best plate (prevents logging bumper stickers, multiple misreads, etc.)
+                    best_plate = select_best_plate(plate_candidates)
+                    
+                    if best_plate:
+                        # Add plate evidence
+                        obj.evidence.append(Evidence(
+                            "ocr", 
+                            "plate_text", 
+                            best_plate.text, 
+                            best_plate.confidence, 
+                            object_id=obj.object_id
+                        ))
                         
                         # Upsert plate to database
                         if plate_service is not None:
-                            plate_service.upsert_repeat(
+                            plate_service.upsert_plate_visit(
                                 conn,
-                                raw_plate_text=tok,
-                                camera_id=int(camera_id) if camera_id is not None else None,
+                                raw_plate_text=best_plate.text,
+                                camera_id=int(camera_id),
                                 seen_ts=now_ts,
                             )
-                    obj.evidence.append(ev)
-                    all_tokens.append(tok)
 
             vr.ocr_tokens = sorted(set(all_tokens))
             vr.ocr_raw = " ".join(vr.ocr_tokens) if vr.ocr_tokens else None

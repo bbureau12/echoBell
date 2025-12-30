@@ -53,7 +53,12 @@ def classify_and_log(
     now_ts = int(now_ts or time.time())
     event_id = event_id or str(uuid.uuid4())
 
-    classified = classify(text=text, vision=vision, db_path=db_path)
+    classified = classify(
+        text=text, 
+        vision=vision, 
+        db_path=db_path,
+        plate_service=plate_service,
+    )
 
     actor = _choose_actor_visitor_id(vision)
     visitor_id = None
@@ -115,7 +120,7 @@ def classify_and_log(
                 if not pr.raw_text or float(pr.conf) < plate_conf_threshold:
                     continue
 
-                rr = plate_service.upsert_repeat(
+                rr = plate_service.upsert_plate_visit(
                     conn,
                     raw_plate_text=pr.raw_text,
                     camera_id=camera_id,
