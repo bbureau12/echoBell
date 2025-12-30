@@ -9,6 +9,7 @@ import cv2
 import sys, os
 
 from packages.data.cache.cache import Cache
+from packages.perception.plate_heurystics import is_plate_candidate
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from packages.common.types import Detection, Evidence, VisionResult, SceneObject
 from .ocr import extract_ocr_tokens_by_object
@@ -225,6 +226,7 @@ def snapshot_and_detect(
     enable_ocr: bool = True,
     cache: Optional[Cache] = None,
     camera_service = None,
+    plate_service = None,
 ) -> VisionResult:
     import cv2, time, sqlite3
     from packages.common.types import Detection, VisionResult, Evidence, SceneObject
@@ -405,6 +407,17 @@ def snapshot_and_detect(
 
                 for tok in obj_tokens:
                     ev = Evidence("ocr", "token", tok, 0.9, object_id=obj.object_id)
+                    if obj.label == "vehicle" and is_plate_candidate(tok):
+                        obj.evidence.append(Evidence("ocr", "plate_text", tok, 0.9, object_id=obj.object_id))
+                        
+                        # Upsert plate to database
+                        if plate_service is not None:
+                            plate_service.upsert_repeat(
+                                conn,
+                                raw_plate_text=tok,
+                                camera_id=int(camera_id) if camera_id is not None else None,
+                                seen_ts=now_ts,
+                            )
                     obj.evidence.append(ev)
                     all_tokens.append(tok)
 
