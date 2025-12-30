@@ -115,6 +115,7 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
             cache=cache,
             camera_service=ctx.camera_service,
             plate_service=ctx.plate_service,
+            plate_modifiers=config.plate_modifiers,
         )
 
         # 1.5) Extract plate reads from vision evidence

@@ -9,5 +9,21 @@
   "retention": {
     "save_visitor_snapshot": true,
     "gap_between_visits_seconds": 3600
+  },
+  "plate_modifiers": {
+    "boost_standard_length": 0.35,
+    "boost_acceptable_length": 0.20,
+    "boost_good_balance": 0.35,
+    "boost_weak_balance": 0.20,
+    "boost_spatial_position": 0.15,
+    "max_confidence": 0.95,
+    "max_horizontal_gap": 2.0,
+    "max_vertical_offset": 0.5,
+    "expected_horizontal_range": [0.2, 0.8],
+    "expected_vertical_range": [0.5, 1.0],
+    "min_component_len": 2,
+    "max_component_len": 4,
+    "min_candidate_len": 5,
+    "max_candidate_len": 8
   }
 }

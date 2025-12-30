@@ -9,7 +9,10 @@ import cv2
 import sys, os
 
 from packages.data.cache.cache import Cache
-from packages.perception.plate_heurystics import is_plate_candidate, is_plate_component, group_plate_tokens, select_best_plate
+from packages.perception.plate_heurystics import (
+    is_plate_candidate, is_plate_component, group_plate_tokens, 
+    select_best_plate, PlateModifiers
+)
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from packages.common.types import Detection, Evidence, VisionResult, SceneObject
 from .ocr import extract_ocr_tokens_by_object
@@ -227,6 +230,7 @@ def snapshot_and_detect(
     cache: Optional[Cache] = None,
     camera_service = None,
     plate_service = None,
+    plate_modifiers: Optional[PlateModifiers] = None,
 ) -> VisionResult:
     import cv2, time, sqlite3
     from packages.common.types import Detection, VisionResult, Evidence, SceneObject
@@ -421,10 +425,16 @@ def snapshot_and_detect(
                 
                 # Process vehicle plates: group nearby tokens into complete plates
                 if obj.label == "vehicle" and allow_plate_ocr:
-                    plate_candidates = group_plate_tokens(ocr_tokens)
+                    # Use provided modifiers or create default
+                    mods = plate_modifiers if plate_modifiers is not None else PlateModifiers()
+                    
+                    # Get vehicle bounding box for spatial validation
+                    vehicle_bbox = obj.box if obj.box else None
+                    
+                    plate_candidates = group_plate_tokens(ocr_tokens, mods, vehicle_bbox)
                     
                     # Select best plate (prevents logging bumper stickers, multiple misreads, etc.)
-                    best_plate = select_best_plate(plate_candidates)
+                    best_plate = select_best_plate(plate_candidates, mods)
                     
                     if best_plate:
                         # Add plate evidence

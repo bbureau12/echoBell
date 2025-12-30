@@ -8,6 +8,7 @@ import secrets
 
 from packages.data.camera_service import CameraService
 from packages.perception.plate_service import PlateService
+from packages.perception.plate_heurystics import PlateModifiers
 from packages.common.config_models import RetentionSettings
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -26,11 +27,15 @@ class AppConfig:
     cache_long_minutes: int = 1440
     plate_secret_key: Optional[str] = None  # Hex string for plate hashing
     retention: RetentionSettings = None
+    plate_modifiers: PlateModifiers = None
 
     def __post_init__(self):
         # Ensure retention is set to defaults if None
         if self.retention is None:
             object.__setattr__(self, 'retention', RetentionSettings())
+        # Ensure plate_modifiers is set to defaults if None
+        if self.plate_modifiers is None:
+            object.__setattr__(self, 'plate_modifiers', PlateModifiers())
 
     @classmethod
     def from_json(cls, json_path: str) -> "AppConfig":
@@ -42,7 +47,11 @@ class AppConfig:
         retention_data = data.pop("retention", {})
         retention = RetentionSettings(**retention_data) if retention_data else RetentionSettings()
         
-        return cls(**data, retention=retention)
+        # Handle plate_modifiers settings separately
+        plate_modifiers_data = data.pop("plate_modifiers", {})
+        plate_modifiers = PlateModifiers(**plate_modifiers_data) if plate_modifiers_data else PlateModifiers()
+        
+        return cls(**data, retention=retention, plate_modifiers=plate_modifiers)
 
     @classmethod
     def from_json_or_defaults(cls, json_path: Optional[str] = None) -> "AppConfig":

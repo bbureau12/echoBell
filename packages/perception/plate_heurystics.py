@@ -7,16 +7,49 @@ _PLATE_ALNUM_RE = re.compile(r"^[A-Z0-9]+$")
 @dataclass
 class PlateCandidate:
     """A grouped plate candidate with combined text and average confidence."""
-    text: str           # Combined plate text (uppercase)
-    confidence: float   # Average confidence from constituent tokens
-    token_count: int    # Number of tokens that were grouped
+    text: str                    # Combined plate text (uppercase)
+    confidence: float            # Average confidence from constituent tokens
+    token_count: int             # Number of tokens that were grouped
+    center: tuple = None         # (x, y) center position of plate
+    vehicle_bbox: tuple = None   # (x1, y1, x2, y2) bounding box of parent vehicle
 
-def is_plate_component(token: str, *, min_len: int = 2, max_len: int = 4) -> bool:
+@dataclass
+class PlateModifiers:
+    """Configuration for plate detection and confidence boosting."""
+    
+    # Pattern-based confidence boosting
+    boost_standard_length: float = 0.35      # Boost for 6-7 char plates
+    boost_acceptable_length: float = 0.20    # Boost for 5 or 8 char plates
+    boost_good_balance: float = 0.35         # Boost for 2-4 alphas AND 2-4 digits
+    boost_weak_balance: float = 0.20         # Boost for any alphas AND any digits
+    boost_spatial_position: float = 0.15     # Boost for plates in expected location (center-bottom)
+    
+    # Confidence caps
+    max_confidence: float = 0.95             # Cap to avoid overconfidence
+    
+    # Proximity grouping thresholds
+    max_horizontal_gap: float = 2.0          # Max gap as multiple of avg height
+    max_vertical_offset: float = 0.5         # Max vertical offset as multiple of avg height
+    
+    # Spatial position validation (relative to vehicle bbox)
+    expected_horizontal_range: tuple = (0.2, 0.8)  # Plate should be in center 60% horizontally (0.2 to 0.8)
+    expected_vertical_range: tuple = (0.5, 1.0)    # Plate should be in bottom 50% vertically (0.5 to 1.0)
+    
+    # Validation thresholds
+    min_component_len: int = 2               # Min length for plate fragment
+    max_component_len: int = 4               # Max length for plate fragment
+    min_candidate_len: int = 5               # Min length for complete plate
+    max_candidate_len: int = 8               # Max length for complete plate
+
+def is_plate_component(token: str, modifiers: PlateModifiers = None) -> bool:
     if not token:
         return False
+    
+    if modifiers is None:
+        modifiers = PlateModifiers()
 
     s = token.strip().upper()
-    if len(s) < min_len or len(s) > max_len:
+    if len(s) < modifiers.min_component_len or len(s) > modifiers.max_component_len:
         return False
 
     if not _PLATE_ALNUM_RE.match(s):
@@ -24,26 +57,24 @@ def is_plate_component(token: str, *, min_len: int = 2, max_len: int = 4) -> boo
 
     return True
 
-def is_plate_candidate(
-    token: str,
-    *,
-    min_len: int = 5,
-    max_len: int = 8,
-) -> bool:
+def is_plate_candidate(token: str, modifiers: PlateModifiers = None) -> bool:
     """
     Heuristic filter for license-plate-like OCR tokens.
 
     Rules (intentionally conservative):
     - Alphanumeric only
-    - Length between 5 and 8
+    - Length between min_candidate_len and max_candidate_len (default 5-8)
     - Contains at least one letter and one digit
     """
     if not token:
         return False
+    
+    if modifiers is None:
+        modifiers = PlateModifiers()
 
     s = token.strip().upper()
 
-    if len(s) < min_len or len(s) > max_len:
+    if len(s) < modifiers.min_candidate_len or len(s) > modifiers.max_candidate_len:
         return False
 
     if not _PLATE_ALNUM_RE.match(s):
@@ -58,7 +89,7 @@ def is_plate_candidate(
     return True
 
 
-def group_plate_tokens(tokens: List, *, max_horizontal_gap: float = 2.0, max_vertical_offset: float = 0.5) -> List[PlateCandidate]:
+def group_plate_tokens(tokens: List, modifiers: PlateModifiers = None, vehicle_bbox: tuple = None) -> List[PlateCandidate]:
     """
     Group OCR tokens by spatial proximity to form complete license plates.
     
@@ -68,8 +99,8 @@ def group_plate_tokens(tokens: List, *, max_horizontal_gap: float = 2.0, max_ver
     
     Args:
         tokens: List of OCRToken objects (must have .text, .confidence, .center, .height properties)
-        max_horizontal_gap: Maximum horizontal distance as multiple of average height
-        max_vertical_offset: Maximum vertical distance as multiple of average height
+        modifiers: PlateModifiers configuration object
+        vehicle_bbox: (x1, y1, x2, y2) bounding box of parent vehicle for spatial validation
     
     Returns:
         List of PlateCandidate objects for tokens that form valid plates
@@ -85,19 +116,24 @@ def group_plate_tokens(tokens: List, *, max_horizontal_gap: float = 2.0, max_ver
     if not tokens:
         return []
     
+    if modifiers is None:
+        modifiers = PlateModifiers()
+    
     candidates = []
     
     # First pass: Check for complete plates (single tokens)
     for tok in tokens:
-        if is_plate_candidate(tok.text):
+        if is_plate_candidate(tok.text, modifiers):
             candidates.append(PlateCandidate(
                 text=tok.text.upper(),
                 confidence=tok.confidence,
-                token_count=1
+                token_count=1,
+                center=tok.center,
+                vehicle_bbox=vehicle_bbox
             ))
     
     # Second pass: Group plate components for fragmented plates
-    plate_components = [t for t in tokens if is_plate_component(t.text)]
+    plate_components = [t for t in tokens if is_plate_component(t.text, modifiers)]
     
     if not plate_components:
         return candidates  # Return only complete plates found in first pass
@@ -123,7 +159,7 @@ def group_plate_tokens(tokens: List, *, max_horizontal_gap: float = 2.0, max_ver
         # Tokens are "close" if:
         # - Horizontal gap < max_horizontal_gap * average height
         # - Vertical offset < max_vertical_offset * average height
-        if dx < (avg_height * max_horizontal_gap) and dy < (avg_height * max_vertical_offset):
+        if dx < (avg_height * modifiers.max_horizontal_gap) and dy < (avg_height * modifiers.max_vertical_offset):
             current_group.append(curr_tok)
         else:
             # Start new group
@@ -137,12 +173,19 @@ def group_plate_tokens(tokens: List, *, max_horizontal_gap: float = 2.0, max_ver
     for group in plate_groups:
         combined_text = "".join(t.text.upper() for t in group)
         
-        if is_plate_candidate(combined_text):
+        if is_plate_candidate(combined_text, modifiers):
             avg_conf = sum(t.confidence for t in group) / len(group)
+            # Calculate center as average of all token centers
+            avg_center = (
+                sum(t.center[0] for t in group) / len(group),
+                sum(t.center[1] for t in group) / len(group)
+            )
             candidates.append(PlateCandidate(
                 text=combined_text,
                 confidence=avg_conf,
-                token_count=len(group)
+                token_count=len(group),
+                center=avg_center,
+                vehicle_bbox=vehicle_bbox
             ))
     
     # Deduplicate: If we found both "ABC123" as a single token AND "ABC"+"123" grouped,
@@ -161,7 +204,7 @@ def group_plate_tokens(tokens: List, *, max_horizontal_gap: float = 2.0, max_ver
     return unique_candidates
 
 
-def select_best_plate(candidates: List[PlateCandidate]) -> PlateCandidate | None:
+def select_best_plate(candidates: List[PlateCandidate], modifiers: PlateModifiers = None) -> PlateCandidate | None:
     """
     Select the most likely real plate from multiple candidates.
     
@@ -173,6 +216,7 @@ def select_best_plate(candidates: List[PlateCandidate]) -> PlateCandidate | None
     
     Args:
         candidates: List of PlateCandidate objects
+        modifiers: PlateModifiers configuration object
     
     Returns:
         The single best candidate (with potentially boosted confidence), or None if empty list
@@ -180,11 +224,20 @@ def select_best_plate(candidates: List[PlateCandidate]) -> PlateCandidate | None
     if not candidates:
         return None
     
+    if modifiers is None:
+        modifiers = PlateModifiers()
+    
     if len(candidates) == 1:
         # Still apply confidence boost to single candidate
         c = candidates[0]
-        boosted_conf = _boost_confidence_for_pattern(c.text, c.confidence)
-        return PlateCandidate(text=c.text, confidence=boosted_conf, token_count=c.token_count)
+        boosted_conf = _boost_confidence_for_pattern(c, modifiers)
+        return PlateCandidate(
+            text=c.text, 
+            confidence=boosted_conf, 
+            token_count=c.token_count,
+            center=c.center,
+            vehicle_bbox=c.vehicle_bbox
+        )
     
     # Score each candidate
     scored = []
@@ -215,26 +268,35 @@ def select_best_plate(candidates: List[PlateCandidate]) -> PlateCandidate | None
     # Sort by score descending and return the best with boosted confidence
     scored.sort(key=lambda x: x[0], reverse=True)
     best = scored[0][1]
-    boosted_conf = _boost_confidence_for_pattern(best.text, best.confidence)
-    return PlateCandidate(text=best.text, confidence=boosted_conf, token_count=best.token_count)
+    boosted_conf = _boost_confidence_for_pattern(best, modifiers)
+    return PlateCandidate(
+        text=best.text, 
+        confidence=boosted_conf, 
+        token_count=best.token_count,
+        center=best.center,
+        vehicle_bbox=best.vehicle_bbox
+    )
 
 
-def _boost_confidence_for_pattern(text: str, raw_conf: float) -> float:
+def _boost_confidence_for_pattern(candidate: PlateCandidate, modifiers: PlateModifiers) -> float:
     """
     Boost confidence for plates that strongly match expected patterns.
     
     Pattern-based confidence boosting:
-    - Strong pattern match (6-7 chars, good alpha/digit mix): boost significantly
-    - Weak pattern match: minimal boost
-    - Poor pattern: no boost (keep raw confidence)
+    - Standard length (6-7 chars)
+    - Good alpha/digit balance  
+    - Spatial position (center-bottom of vehicle)
     
     Args:
-        text: Plate text (already validated as plate candidate)
-        raw_conf: Raw OCR confidence (0.0 - 1.0)
+        candidate: PlateCandidate with text, confidence, and spatial info
+        modifiers: PlateModifiers configuration object
     
     Returns:
-        Boosted confidence (capped at 0.95 to avoid overconfidence)
+        Boosted confidence (capped at max_confidence to avoid overconfidence)
     """
+    text = candidate.text
+    raw_conf = candidate.confidence
+    
     # Count alphas and digits
     alpha_count = sum(1 for c in text if c.isalpha())
     digit_count = sum(1 for c in text if c.isdigit())
@@ -242,22 +304,55 @@ def _boost_confidence_for_pattern(text: str, raw_conf: float) -> float:
     
     boost = 0.0
     
-    # Standard length (6-7 chars) - boost more aggressively
+    # Standard length (6-7 chars)
     if 6 <= total_len <= 7:
-        boost += 0.4  # Increased from 0.3
+        boost += modifiers.boost_standard_length
     elif 5 <= total_len <= 8:
-        boost += 0.30  # Increased from 0.15
+        boost += modifiers.boost_acceptable_length
     
     # Good alpha/digit balance (typical plates have 3-4 of each)
     if 2 <= alpha_count <= 4 and 2 <= digit_count <= 4:
-        boost += 0.40  # Increased from 0.3
+        boost += modifiers.boost_good_balance
     elif alpha_count > 0 and digit_count > 0:
-        boost += 0.30  # Increased from 0.15
+        boost += modifiers.boost_weak_balance
+    
+    # Spatial position boost: plate should be in center-bottom of vehicle
+    if candidate.center and candidate.vehicle_bbox:
+        x1, y1, x2, y2 = candidate.vehicle_bbox
+        plate_x, plate_y = candidate.center
+        
+        # OCR coordinates are relative to the cropped vehicle bbox
+        # Convert to absolute image coordinates first
+        abs_plate_x = x1 + plate_x
+        abs_plate_y = y1 + plate_y
+        
+        # Now normalize to 0-1 relative to vehicle bbox
+        rel_x = (abs_plate_x - x1) / (x2 - x1) if (x2 - x1) > 0 else 0.5
+        rel_y = (abs_plate_y - y1) / (y2 - y1) if (y2 - y1) > 0 else 0.5
+        
+        # Debug: log spatial position (can be removed later)
+        print(f"[PLATE SPATIAL] plate={candidate.text}, "
+              f"crop_center=({plate_x:.1f},{plate_y:.1f}), "
+              f"abs_center=({abs_plate_x:.1f},{abs_plate_y:.1f}), "
+              f"vehicle_bbox=({x1},{y1},{x2},{y2}), "
+              f"rel_pos=({rel_x:.2f},{rel_y:.2f})")
+        
+        # Check if plate is in expected region
+        h_min, h_max = modifiers.expected_horizontal_range
+        v_min, v_max = modifiers.expected_vertical_range
+        
+        if h_min <= rel_x <= h_max and v_min <= rel_y <= v_max:
+            boost += modifiers.boost_spatial_position
+            print(f"[PLATE SPATIAL] ✓ Plate in expected region, adding {modifiers.boost_spatial_position} boost")
+        else:
+            print(f"[PLATE SPATIAL] ✗ Plate outside expected region "
+                  f"(h: {h_min}-{h_max}, v: {v_min}-{v_max}), no spatial boost")
     
     # Apply boost with diminishing returns for already-high confidence
     # Formula: new_conf = raw + boost * (1 - raw)
     # This way, low confidence gets bigger boost, high confidence gets smaller
     boosted = raw_conf + boost * (1.0 - raw_conf)
     
-    # Cap at 0.95 to avoid overconfidence
-    return min(0.95, boosted)
+    # Cap at max_confidence to avoid overconfidence
+    return min(modifiers.max_confidence, boosted)
+
