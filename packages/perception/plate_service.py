@@ -204,12 +204,12 @@ class PlateService:
         
         rows = conn.execute(
             """
-            SELECT ve.intent, ve.intent_conf
+            SELECT ve.intent_inferred, ve.intent_confidence
             FROM visitor_events ve
             JOIN visitor_event_plate_sightings veps 
               ON ve.event_id = veps.event_id
             WHERE veps.plate_hmac = ?
-              AND ve.intent IS NOT NULL
+              AND ve.intent_inferred IS NOT NULL
             ORDER BY ve.detected_ts DESC
             LIMIT ?
             """,

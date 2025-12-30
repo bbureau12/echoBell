@@ -169,18 +169,22 @@ def select_best_plate(candidates: List[PlateCandidate]) -> PlateCandidate | None
     1. Prefer standard length plates (6-7 chars) over edge cases
     2. Prefer higher confidence
     3. Prefer fewer tokens (single read vs fragmented)
+    4. Boost confidence for plates matching standard patterns
     
     Args:
         candidates: List of PlateCandidate objects
     
     Returns:
-        The single best candidate, or None if empty list
+        The single best candidate (with potentially boosted confidence), or None if empty list
     """
     if not candidates:
         return None
     
     if len(candidates) == 1:
-        return candidates[0]
+        # Still apply confidence boost to single candidate
+        c = candidates[0]
+        boosted_conf = _boost_confidence_for_pattern(c.text, c.confidence)
+        return PlateCandidate(text=c.text, confidence=boosted_conf, token_count=c.token_count)
     
     # Score each candidate
     scored = []
@@ -208,6 +212,52 @@ def select_best_plate(candidates: List[PlateCandidate]) -> PlateCandidate | None
         
         scored.append((score, candidate))
     
-    # Sort by score descending and return the best
+    # Sort by score descending and return the best with boosted confidence
     scored.sort(key=lambda x: x[0], reverse=True)
-    return scored[0][1]
+    best = scored[0][1]
+    boosted_conf = _boost_confidence_for_pattern(best.text, best.confidence)
+    return PlateCandidate(text=best.text, confidence=boosted_conf, token_count=best.token_count)
+
+
+def _boost_confidence_for_pattern(text: str, raw_conf: float) -> float:
+    """
+    Boost confidence for plates that strongly match expected patterns.
+    
+    Pattern-based confidence boosting:
+    - Strong pattern match (6-7 chars, good alpha/digit mix): boost significantly
+    - Weak pattern match: minimal boost
+    - Poor pattern: no boost (keep raw confidence)
+    
+    Args:
+        text: Plate text (already validated as plate candidate)
+        raw_conf: Raw OCR confidence (0.0 - 1.0)
+    
+    Returns:
+        Boosted confidence (capped at 0.95 to avoid overconfidence)
+    """
+    # Count alphas and digits
+    alpha_count = sum(1 for c in text if c.isalpha())
+    digit_count = sum(1 for c in text if c.isdigit())
+    total_len = len(text)
+    
+    boost = 0.0
+    
+    # Standard length (6-7 chars) - boost more aggressively
+    if 6 <= total_len <= 7:
+        boost += 0.4  # Increased from 0.3
+    elif 5 <= total_len <= 8:
+        boost += 0.30  # Increased from 0.15
+    
+    # Good alpha/digit balance (typical plates have 3-4 of each)
+    if 2 <= alpha_count <= 4 and 2 <= digit_count <= 4:
+        boost += 0.40  # Increased from 0.3
+    elif alpha_count > 0 and digit_count > 0:
+        boost += 0.30  # Increased from 0.15
+    
+    # Apply boost with diminishing returns for already-high confidence
+    # Formula: new_conf = raw + boost * (1 - raw)
+    # This way, low confidence gets bigger boost, high confidence gets smaller
+    boosted = raw_conf + boost * (1.0 - raw_conf)
+    
+    # Cap at 0.95 to avoid overconfidence
+    return min(0.95, boosted)

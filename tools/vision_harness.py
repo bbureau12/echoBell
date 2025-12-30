@@ -11,7 +11,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from packages.classify.classify_and_log import classify_and_log
+from packages.classify.classify_and_log import classify_and_log, PlateRead
 from packages.perception.vision import snapshot_and_detect
 from packages.classify.intent import classify
 
@@ -114,7 +114,44 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
             debug=debug, 
             cache=cache,
             camera_service=ctx.camera_service,
+            plate_service=ctx.plate_service,
         )
+
+        # 1.5) Extract plate reads from vision evidence
+        print(f"\n=== EVIDENCE DEBUG ===")
+        print(f"Total VisionResult evidence items: {len(vr.evidence)}")
+        print(f"Total objects: {len(vr.objects)}")
+        
+        for i, obj in enumerate(vr.objects):
+            print(f"\nObject[{i}] ({obj.label}): {len(obj.evidence)} evidence items")
+            for j, ev in enumerate(obj.evidence):
+                print(f"  [{j}] source={ev.source}, feature={ev.feature}, value={str(ev.value)[:30]}")
+        
+        print(f"\nVisionResult-level evidence:")
+        for i, ev in enumerate(vr.evidence):
+            val_str = str(ev.value)[:30]
+            if ev.source == "ocr":
+                print(f"  [{i}] source={ev.source}, feature={ev.feature}, value={val_str}, conf={ev.conf:.3f}, obj_id={ev.object_id}")
+            else:
+                print(f"  [{i}] source={ev.source}, feature={ev.feature}, value={val_str}, obj_id={ev.object_id}")
+        
+        plate_reads = []
+        for ev in vr.evidence:
+            if ev.source == "ocr" and ev.feature == "plate_text":
+                print(f"  ✓ Found plate_text evidence: {ev.value}")
+                plate_reads.append(PlateRead(
+                    raw_text=ev.value,
+                    conf=ev.conf,
+                    object_id=ev.object_id
+                ))
+        
+        if plate_reads:
+            print(f"\n✓ Extracted {len(plate_reads)} plate reads:")
+            for pr in plate_reads:
+                print(f"  - {pr.raw_text} (conf={pr.conf:.2f}, obj={pr.object_id})")
+        else:
+            print("\n✗ No plate reads extracted from evidence")
+        print(f"=== END EVIDENCE DEBUG ===\n")
 
         # 2) Run intent classification with snapshot service
         classified, event_id = classify_and_log(
@@ -127,6 +164,9 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
             frame_bgr=frame_bgr,
             camera_id=camera_id,
             retention=config.retention,
+            plate_service=ctx.plate_service,
+            plate_reads=plate_reads,
+            # plate_conf_threshold default is 0.65, which should work with pattern-boosted confidence
         )
         print("intent:", classified.intent, classified.conf, "event:", event_id)
 

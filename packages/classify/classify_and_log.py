@@ -117,8 +117,15 @@ def classify_and_log(
             """)
 
             for pr in plate_reads:
-                if not pr.raw_text or float(pr.conf) < plate_conf_threshold:
+                if not pr.raw_text:
+                    print(f"[DEBUG] Skipping plate read: empty raw_text")
                     continue
+                    
+                if float(pr.conf) < plate_conf_threshold:
+                    print(f"[DEBUG] Skipping plate '{pr.raw_text}': conf {pr.conf:.4f} < threshold {plate_conf_threshold}")
+                    continue
+                
+                print(f"[DEBUG] Processing plate '{pr.raw_text}' with conf {pr.conf:.4f}")
 
                 rr = plate_service.upsert_plate_visit(
                     conn,
@@ -126,10 +133,13 @@ def classify_and_log(
                     camera_id=camera_id,
                     seen_ts=now_ts,
                 )
+                print(f"[DEBUG] upsert_plate_visit returned: {rr}")
                 if rr is None:
+                    print(f"[DEBUG] Skipping plate '{pr.raw_text}': upsert returned None")
                     continue
 
                 # Insert if new; if it exists, keep the max confidence
+                print(f"[DEBUG] Inserting into visitor_event_plate_sightings: event_id={event_id}, plate_hmac={rr.plate_hmac}, conf={pr.conf:.4f}")
                 conn.execute(
                     """
                     INSERT INTO visitor_event_plate_sightings

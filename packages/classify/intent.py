@@ -382,7 +382,7 @@ def classify(
         if plate_service is not None:
             plate_texts = [
                 ev.value for ev in vision.evidence 
-                if ev.source == "ocr" and ev.key == "plate_text"
+                if ev.source == "ocr" and ev.feature == "plate_text"
             ]
             
             for plate_text in plate_texts:

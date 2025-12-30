@@ -4,8 +4,10 @@ from typing import Optional
 import os
 import redis
 import json
+import secrets
 
 from packages.data.camera_service import CameraService
+from packages.perception.plate_service import PlateService
 from packages.common.config_models import RetentionSettings
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -22,6 +24,7 @@ class AppConfig:
     cache_short_minutes: int = 5
     cache_medium_minutes: int = 90
     cache_long_minutes: int = 1440
+    plate_secret_key: Optional[str] = None  # Hex string for plate hashing
     retention: RetentionSettings = None
 
     def __post_init__(self):
@@ -67,6 +70,7 @@ class AppContext:
     config: AppConfig
     cache: Optional[Cache]
     camera_service: Optional[CameraService]
+    plate_service: Optional[PlateService]
 
 def build_context(config: AppConfig) -> AppContext:
     cache: Optional[Cache] = None
@@ -92,5 +96,21 @@ def build_context(config: AppConfig) -> AppContext:
         cache_ttl_s=config.cache_long_minutes * 60, # 24 hours default
     )
 
+    # Initialize PlateService with secret key
+    plate_secret_key = None
+    if config.plate_secret_key:
+        # Use provided hex string
+        plate_secret_key = bytes.fromhex(config.plate_secret_key)
+    else:
+        # Generate a random 32-byte key (for development/testing)
+        # In production, this should be stored in config
+        plate_secret_key = secrets.token_bytes(32)
+    
+    plate_service = PlateService(secret_key=plate_secret_key)
 
-    return AppContext(config=config, cache=cache, camera_service=camera_service)
+    return AppContext(
+        config=config, 
+        cache=cache, 
+        camera_service=camera_service,
+        plate_service=plate_service
+    )
