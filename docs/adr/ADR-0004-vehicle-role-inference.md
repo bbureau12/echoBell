@@ -45,3 +45,11 @@ Cons:
 Mitigations:
 - Combine vehicle role with other evidence (time of day, dwell time, packages)
 - Allow future refinement through optional, opt-in classifiers
+
+## Implementation Notes
+License plate OCR candidates are further constrained by spatial heuristics.
+A valid plate candidate must appear within the lower-middle region of a detected
+vehicle bounding box.
+
+This reduces false positives from vehicle logos, bumper stickers, and background
+text while preserving robustness across vehicle types and regions.
