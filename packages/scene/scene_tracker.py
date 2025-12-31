@@ -1,0 +1,393 @@
+# packages/scene/scene_tracker.py
+from __future__ import annotations
+
+import json
+import sqlite3
+import uuid
+from dataclasses import dataclass
+from typing import Optional, Sequence, Tuple, List, Dict
+
+# EchoBell types (adjust import paths if yours differ)
+from packages.common.types import Evidence, VisionResult, SceneObject
+
+
+Box = Tuple[int, int, int, int]
+
+
+def _bbox_area(b: Box) -> float:
+    x1, y1, x2, y2 = b
+    return max(0, x2 - x1) * max(0, y2 - y1)
+
+
+def _intersection_area(a: Box, b: Box) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    return max(0, ix2 - ix1) * max(0, iy2 - iy1)
+
+
+def iou(a: Box, b: Box) -> float:
+    inter = _intersection_area(a, b)
+    if inter <= 0:
+        return 0.0
+    union = _bbox_area(a) + _bbox_area(b) - inter
+    return (inter / union) if union > 0 else 0.0
+
+
+@dataclass(frozen=True)
+class Observation:
+    track_type: str            # 'vehicle' | 'person'
+    box: Box
+    raw_class: str | None = None
+    color: str | None = None
+    # Strong keys (optional)
+    plate_hmac: str | None = None
+    visitor_id: str | None = None
+
+
+@dataclass(frozen=True)
+class TrackRow:
+    id: int
+    camera_id: int
+    track_type: str
+    key_kind: str
+    track_key: str
+    first_seen_ts: int
+    last_seen_ts: int
+    active: int
+    last_box: Box | None
+    raw_class: str | None
+    color: str | None
+
+
+def _box_to_json(b: Box) -> str:
+    x1, y1, x2, y2 = b
+    return json.dumps({"x1": x1, "y1": y1, "x2": x2, "y2": y2}, separators=(",", ":"))
+
+
+def _json_to_box(s: str | None) -> Box | None:
+    if not s:
+        return None
+    try:
+        o = json.loads(s)
+        return (int(o["x1"]), int(o["y1"]), int(o["x2"]), int(o["y2"]))
+    except Exception:
+        return None
+
+
+class SceneTracker:
+    """
+    DB-backed scene tracker.
+    Tracks objects across frames and emits 'scene.*' Evidence entries.
+
+    v1 strategy:
+    - If plate_hmac / visitor_id exists, match on that first.
+    - Otherwise match by IoU against active tracks.
+    - Tracks are marked exited after grace_period_s without being seen.
+    """
+
+    def __init__(
+        self,
+        *,
+        iou_match_threshold: float = 0.30,
+        grace_period_s: int = 6,
+    ):
+        self.iou_match_threshold = float(iou_match_threshold)
+        self.grace_period_s = int(grace_period_s)
+
+    def ensure_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS scene_tracks (
+          id            INTEGER PRIMARY KEY AUTOINCREMENT,
+          camera_id      INTEGER NOT NULL,
+          track_type     TEXT NOT NULL,
+          key_kind       TEXT NOT NULL,
+          track_key      TEXT NOT NULL,
+          first_seen_ts  INTEGER NOT NULL,
+          last_seen_ts   INTEGER NOT NULL,
+          active         INTEGER NOT NULL DEFAULT 1,
+          last_box_json  TEXT,
+          raw_class      TEXT,
+          color          TEXT,
+          last_event_id  TEXT,
+          UNIQUE(camera_id, track_type, track_key)
+        );
+        """)
+        conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_scene_tracks_active
+          ON scene_tracks(camera_id, track_type, active, last_seen_ts);
+        """)
+        conn.commit()
+
+    def _load_active_tracks(self, conn: sqlite3.Connection, *, camera_id: int, track_type: str) -> list[TrackRow]:
+        rows = conn.execute(
+            """
+            SELECT id, camera_id, track_type, key_kind, track_key,
+                   first_seen_ts, last_seen_ts, active, last_box_json, raw_class, color
+            FROM scene_tracks
+            WHERE camera_id=? AND track_type=? AND active=1
+            """,
+            (camera_id, track_type),
+        ).fetchall()
+
+        out: list[TrackRow] = []
+        for (tid, cam, ttype, kind, tkey, fst, lst, active, box_json, raw_class, color) in rows:
+            out.append(
+                TrackRow(
+                    id=int(tid),
+                    camera_id=int(cam),
+                    track_type=str(ttype),
+                    key_kind=str(kind),
+                    track_key=str(tkey),
+                    first_seen_ts=int(fst),
+                    last_seen_ts=int(lst),
+                    active=int(active),
+                    last_box=_json_to_box(box_json),
+                    raw_class=raw_class,
+                    color=color,
+                )
+            )
+        return out
+
+    def _update_track_seen(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        track_id: int,
+        now_ts: int,
+        box: Box,
+        raw_class: str | None,
+        color: str | None,
+        last_event_id: str | None,
+    ) -> None:
+        conn.execute(
+            """
+            UPDATE scene_tracks
+            SET last_seen_ts=?, last_box_json=?, raw_class=COALESCE(?, raw_class),
+                color=COALESCE(?, color), last_event_id=COALESCE(?, last_event_id)
+            WHERE id=?
+            """,
+            (now_ts, _box_to_json(box), raw_class, color, last_event_id, track_id),
+        )
+
+    def _insert_track(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        camera_id: int,
+        track_type: str,
+        key_kind: str,
+        track_key: str,
+        now_ts: int,
+        box: Box,
+        raw_class: str | None,
+        color: str | None,
+        last_event_id: str | None,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO scene_tracks
+              (camera_id, track_type, key_kind, track_key, first_seen_ts, last_seen_ts,
+               active, last_box_json, raw_class, color, last_event_id)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+            """,
+            (camera_id, track_type, key_kind, track_key, now_ts, now_ts, _box_to_json(box), raw_class, color, last_event_id),
+        )
+
+    def _mark_exited(self, conn: sqlite3.Connection, *, track_id: int, now_ts: int) -> None:
+        conn.execute(
+            "UPDATE scene_tracks SET active=0, last_seen_ts=? WHERE id=?",
+            (now_ts, track_id),
+        )
+
+    def update(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        camera_id: int,
+        now_ts: int,
+        observations: Sequence[Observation],
+        event_id: str | None = None,
+    ) -> list[Evidence]:
+        """
+        Update scene tracks with current frame observations and return scene Evidence.
+        """
+        # Group observations by type
+        obs_by_type: dict[str, list[Observation]] = {"vehicle": [], "person": []}
+        for o in observations:
+            if o.track_type in obs_by_type:
+                obs_by_type[o.track_type].append(o)
+
+        evidence: list[Evidence] = []
+
+        for track_type in ("vehicle", "person"):
+            active_tracks = self._load_active_tracks(conn, camera_id=camera_id, track_type=track_type)
+            matched_track_ids: set[int] = set()
+
+            entered = 0
+            still_present = 0
+
+            # Build quick maps for strong keys
+            by_key: dict[str, TrackRow] = {}
+            for tr in active_tracks:
+                if tr.track_key:
+                    by_key[tr.track_key] = tr
+
+            for obs in obs_by_type[track_type]:
+                # 1) Strong-key match first
+                strong_key = None
+                strong_kind = None
+                if track_type == "vehicle" and obs.plate_hmac:
+                    strong_key = obs.plate_hmac
+                    strong_kind = "plate"
+                elif track_type == "person" and obs.visitor_id:
+                    strong_key = obs.visitor_id
+                    strong_kind = "visitor"
+
+                if strong_key and strong_key in by_key:
+                    tr = by_key[strong_key]
+                    matched_track_ids.add(tr.id)
+                    still_present += 1
+                    self._update_track_seen(
+                        conn,
+                        track_id=tr.id,
+                        now_ts=now_ts,
+                        box=obs.box,
+                        raw_class=obs.raw_class,
+                        color=obs.color,
+                        last_event_id=event_id,
+                    )
+                    continue
+
+                # 2) IoU match against remaining active tracks
+                best = None
+                best_iou = 0.0
+
+                for tr in active_tracks:
+                    if tr.id in matched_track_ids:
+                        continue
+                    if not tr.last_box:
+                        continue
+                    v = iou(obs.box, tr.last_box)
+                    if v > best_iou:
+                        best_iou = v
+                        best = tr
+
+                if best is not None and best_iou >= self.iou_match_threshold:
+                    matched_track_ids.add(best.id)
+                    still_present += 1
+                    self._update_track_seen(
+                        conn,
+                        track_id=best.id,
+                        now_ts=now_ts,
+                        box=obs.box,
+                        raw_class=obs.raw_class,
+                        color=obs.color,
+                        last_event_id=event_id,
+                    )
+
+                    # 2.5) Upgrade key if we now have a strong key (plate/visitor)
+                    if strong_key and best.track_key.startswith("temp:"):
+                        # mark old temp track inactive and create new keyed track (simple v1)
+                        # (keeps UNIQUE constraint simple)
+                        self._mark_exited(conn, track_id=best.id, now_ts=now_ts)
+                        self._insert_track(
+                            conn,
+                            camera_id=camera_id,
+                            track_type=track_type,
+                            key_kind=strong_kind or "iou",
+                            track_key=strong_key,
+                            now_ts=now_ts,
+                            box=obs.box,
+                            raw_class=obs.raw_class,
+                            color=obs.color,
+                            last_event_id=event_id,
+                        )
+                        entered += 1
+                    continue
+
+                # 3) New track
+                temp_key = f"temp:{uuid.uuid4().hex}"
+                self._insert_track(
+                    conn,
+                    camera_id=camera_id,
+                    track_type=track_type,
+                    key_kind="iou",
+                    track_key=temp_key,
+                    now_ts=now_ts,
+                    box=obs.box,
+                    raw_class=obs.raw_class,
+                    color=obs.color,
+                    last_event_id=event_id,
+                )
+                entered += 1
+
+            # 4) Exit tracks that were not matched, after grace period
+            exited = 0
+            for tr in active_tracks:
+                if tr.id in matched_track_ids:
+                    continue
+                age = now_ts - tr.last_seen_ts
+                if age >= self.grace_period_s:
+                    self._mark_exited(conn, track_id=tr.id, now_ts=now_ts)
+                    exited += 1
+
+            # Emit evidence for this type
+            current_count = len(obs_by_type[track_type])
+            if current_count > 0:
+                evidence.append(Evidence("scene", f"{track_type}_present", "true", 0.9, object_id=None))
+            evidence.append(Evidence("scene", f"{track_type}_count", str(current_count), 1.0, object_id=None))
+
+            if entered > 0:
+                evidence.append(Evidence("scene", f"{track_type}_entered", str(entered), 0.9, object_id=None))
+            if exited > 0:
+                evidence.append(Evidence("scene", f"{track_type}_exited", str(exited), 0.9, object_id=None))
+            if still_present > 0:
+                evidence.append(Evidence("scene", f"{track_type}_still_present", str(still_present), 0.8, object_id=None))
+
+        conn.commit()
+        return evidence
+
+
+def build_observations_from_vision(
+    vr: VisionResult,
+    *,
+    plate_hmac_by_object_id: dict[int, str] | None = None,
+) -> list[Observation]:
+    """
+    Helper to convert a VisionResult into SceneTracker observations.
+    plate_hmac_by_object_id: map vehicle object_id -> plate_hmac when available.
+    """
+    plate_hmac_by_object_id = plate_hmac_by_object_id or {}
+
+    obs: list[Observation] = []
+    for o in (vr.objects or []):
+        label = (o.label or "").lower()
+        if label not in ("vehicle", "person"):
+            continue
+
+        # If you add this in vision: obj.props["raw_class"] = det.cls.lower()
+        raw_class = (o.props.get("raw_class") if getattr(o, "props", None) else None)
+        color = (o.props.get("color") if getattr(o, "props", None) else None)
+
+        plate_hmac = None
+        visitor_id = None
+
+        if label == "vehicle":
+            plate_hmac = plate_hmac_by_object_id.get(int(o.object_id)) if o.object_id is not None else None
+        else:
+            visitor_id = o.props.get("visitor_id") if getattr(o, "props", None) else None
+
+        obs.append(
+            Observation(
+                track_type=label,
+                box=o.box,
+                raw_class=str(raw_class) if raw_class else None,
+                color=str(color) if color else None,
+                plate_hmac=str(plate_hmac) if plate_hmac else None,
+                visitor_id=str(visitor_id) if visitor_id else None,
+            )
+        )
+
+    return obs

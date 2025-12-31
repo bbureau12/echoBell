@@ -133,6 +133,31 @@ capabilities. The demo is designed to be completed in approximately 5 minutes.
 - Best plate selection prevents false positives (bumper stickers, misreads)
 - Plate visit history can boost intent classification confidence
 
+## Scenario 5: Scene awareness and temporal reasoning
+
+**What happens**
+- A vehicle enters the camera view and remains present for several seconds.
+- No person is initially visible.
+- After a short dwell period, a person exits the vehicle.
+- The vehicle later leaves the scene.
+
+**Scene evidence emitted**
+- scene.vehicle_entered = true
+- scene.vehicle_present = true
+- scene.vehicle_dwell_s > threshold
+- scene.person_entered = true
+- scene.vehicle_exited = true
+
+**Result**
+- Events are created even when no visitor is initially present.
+- Temporal evidence is attached to events and consumed by the classifier.
+- Intent inference is informed by *change over time*, not a single frame.
+
+**What this demonstrates**
+- Vision is stateless and frame-based.
+- Sc
+
+
 ---
 
 ## Future Demo Extensions (Optional)

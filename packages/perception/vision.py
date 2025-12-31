@@ -349,6 +349,7 @@ def snapshot_and_detect(
                 parent_id=None,
             )
 
+            obj.props["raw_class"] = det.cls.lower()
             obj.props["color"] = (det.color or "unknown").lower()
             obj.props["conf"] = float(det.conf)
 
