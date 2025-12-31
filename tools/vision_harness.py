@@ -21,6 +21,9 @@ from apps.app import AppConfig, build_context
 # Import SnapshotService for saving visitor snapshots
 from packages.data.snapshot_service import SnapshotService
 
+# Import SceneTracker for vehicle/person enter/exit tracking
+from packages.scene.scene_tracker import SceneTracker
+
 
 VALID_EXT = (".jpg", ".jpeg", ".png")
 
@@ -92,6 +95,13 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
     )
     print(f"[SNAPSHOT] Service initialized: {snapshot_service.output_dir}")
     
+    # Create scene tracker for vehicle/person enter/exit detection
+    scene_tracker = SceneTracker(
+        iou_match_threshold=0.30,  # 30% bounding box overlap to match tracks
+        grace_period_s=6,          # 6 seconds before marking object as exited
+    )
+    print(f"[SCENE] Tracker initialized: IoU={scene_tracker.iou_match_threshold}, grace={scene_tracker.grace_period_s}s")
+    
     # Clean up any annotated files before running tests
     cleanup_annotated_files(dataset_root)
 
@@ -154,7 +164,7 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
             print("\n✗ No plate reads extracted from evidence")
         print(f"=== END EVIDENCE DEBUG ===\n")
 
-        # 2) Run intent classification with snapshot service
+        # 2) Run intent classification with snapshot service and scene tracker
         classified, event_id = classify_and_log(
             db_path=db_path,
             vision=vr,
@@ -167,6 +177,7 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
             retention=config.retention,
             plate_service=ctx.plate_service,
             plate_reads=plate_reads,
+            scene_tracker=scene_tracker,  # Track vehicles/people entering and exiting
             # plate_conf_threshold default is 0.65, which should work with pattern-boosted confidence
         )
         print("intent:", classified.intent, classified.conf, "event:", event_id)

@@ -141,7 +141,7 @@ def _update_scene_tracking(
     if not scene_tracker or camera_id is None:
         return
     
-    SceneTracker.ensure_schema(conn)
+    scene_tracker.ensure_schema(conn)
     observations = build_observations_from_vision(vision, plate_hmac_by_object_id=plate_hmac_by_object_id)
     
     scene_evidence = scene_tracker.update(
