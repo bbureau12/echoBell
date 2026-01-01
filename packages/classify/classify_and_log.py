@@ -575,7 +575,6 @@ def classify_and_log(
         text=text, 
         vision=vision, 
         db_path=db_path,
-        plate_service=plate_service,
     )
     print(f"[CLASSIFY] Intent={classified.intent}, Conf={classified.conf:.2f}, Urgency={classified.urgency}")
 
