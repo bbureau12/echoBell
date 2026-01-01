@@ -97,6 +97,44 @@ class PlateService:
             return None
         return plate_hmac_hex(self.secret_key, normalized)
     
+    def is_plate_trusted(
+        self,
+        conn: sqlite3.Connection,
+        raw_plate_text: str,
+    ) -> Optional[dict]:
+        """
+        Check if a plate is in the trusted_plates table.
+        
+        Args:
+            conn: Database connection
+            raw_plate_text: Raw plate text from OCR
+        
+        Returns:
+            Dict with {"plate_hmac": str, "label": str, "enabled": bool} if trusted,
+            None if not found or disabled
+        """
+        plate_hmac = self._hmac_from_raw(raw_plate_text)
+        if not plate_hmac:
+            return None
+        
+        row = conn.execute(
+            """
+            SELECT plate_hmac, label, enabled
+            FROM trusted_plates
+            WHERE plate_hmac = ? AND enabled = 1
+            """,
+            (plate_hmac,)
+        ).fetchone()
+        
+        if not row:
+            return None
+        
+        return {
+            "plate_hmac": row[0],
+            "label": row[1],
+            "enabled": bool(row[2])
+        }
+    
     def add_trusted_plate(
         self,
         conn: sqlite3.Connection,

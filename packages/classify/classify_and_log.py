@@ -68,15 +68,20 @@ def _link_plates_to_event(
     event_id: str,
     camera_id: int | None,
     now_ts: int,
-) -> dict[int, str]:
+    vision: VisionResult,
+) -> tuple[dict[int, str], list]:
     """
     Process plate reads and link them to the visitor event.
-    Returns a dict mapping object_id -> plate_hmac for scene tracking.
+    Also adds trusted plate info to vehicle SceneObject props.
+    Returns:
+        - dict mapping object_id -> plate_hmac for scene tracking
+        - list of Evidence for trusted plates
     """
     plate_hmac_by_object_id = {}
+    trusted_plate_evidence = []
     
     if not plate_service or not plate_reads:
-        return plate_hmac_by_object_id
+        return plate_hmac_by_object_id, trusted_plate_evidence
     
     _ensure_plate_sighting_schema(conn)
     
@@ -106,6 +111,30 @@ def _link_plates_to_event(
         if pr.object_id is not None and rr.plate_hmac:
             plate_hmac_by_object_id[pr.object_id] = rr.plate_hmac
 
+        # Check if plate is trusted and add evidence
+        trusted_info = plate_service.is_plate_trusted(conn, pr.raw_text)
+        if trusted_info:
+            print(f"[DEBUG] Plate '{pr.raw_text}' is TRUSTED with label '{trusted_info['label']}'")
+            from packages.common.types import Evidence
+            trusted_plate_evidence.append(
+                Evidence(
+                    source="plate_trust",
+                    key="trusted_plate",
+                    value=trusted_info["label"],
+                    confidence=1.0,
+                    object_id=pr.object_id
+                )
+            )
+            
+            # Also add to vehicle SceneObject props
+            if pr.object_id is not None and vision.objects:
+                for obj in vision.objects:
+                    if obj.object_id == pr.object_id and obj.label == "vehicle":
+                        obj.props["trusted_plate_label"] = trusted_info["label"]
+                        obj.props["is_trusted_plate"] = True
+                        print(f"[DEBUG] Added trusted_plate_label='{trusted_info['label']}' to vehicle object_id={pr.object_id}")
+                        break
+
         # Link plate to event
         print(f"[DEBUG] Inserting into visitor_event_plate_sightings: event_id={event_id}, plate_hmac={rr.plate_hmac}, conf={pr.conf:.4f}")
         conn.execute(
@@ -125,7 +154,7 @@ def _link_plates_to_event(
             (event_id, rr.plate_hmac, float(pr.conf), camera_id, pr.object_id, now_ts),
         )
     
-    return plate_hmac_by_object_id
+    return plate_hmac_by_object_id, trusted_plate_evidence
 
 
 def _update_scene_tracking(
@@ -320,7 +349,7 @@ def classify_and_log(
         )
 
         # 2) Link plates to event and get HMACs for scene tracking
-        plate_hmac_by_object_id = _link_plates_to_event(
+        plate_hmac_by_object_id, trusted_plate_evidence = _link_plates_to_event(
             conn,
             plate_service=plate_service,
             plate_reads=plate_reads,
@@ -328,7 +357,12 @@ def classify_and_log(
             event_id=event_id,
             camera_id=camera_id,
             now_ts=now_ts,
+            vision=vision,
         )
+        
+        # Add trusted plate evidence to vision
+        if trusted_plate_evidence:
+            vision.evidence.extend(trusted_plate_evidence)
         
         # 3) Update scene tracking (vehicles/people entering/exiting)
         _update_scene_tracking(
