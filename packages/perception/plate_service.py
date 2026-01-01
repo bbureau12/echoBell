@@ -88,6 +88,15 @@ class PlateService:
         )
         conn.commit()
     
+    def _hmac_from_raw(self, raw_plate_text: str) -> Optional[str]:
+        """
+        Normalize and hash a raw plate text. Returns None if invalid.
+        """
+        normalized = normalize_plate_text(raw_plate_text)
+        if not normalized:
+            return None
+        return plate_hmac_hex(self.secret_key, normalized)
+    
     def add_trusted_plate(
         self,
         conn: sqlite3.Connection,
