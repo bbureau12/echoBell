@@ -392,6 +392,7 @@ CREATE TABLE scene_tracks (
     raw_class TEXT,         -- 'car', 'truck', etc.
     color TEXT,
     last_event_id TEXT,
+    tags TEXT,              -- Space-separated keywords
     UNIQUE(camera_id, track_key)
 );
 ```
@@ -682,9 +683,17 @@ CREATE TABLE scene_tracks (
     raw_class TEXT,                   -- 'car', 'truck', etc.
     color TEXT,
     last_event_id TEXT,
+    tags TEXT,                        -- Space-separated keywords (e.g., "suspicious loitering")
     UNIQUE(camera_id, track_key)
 );
 ```
+
+**Tags Field** (Future Expansion):
+- Space-separated keywords for track classification
+- Examples: `"suspicious loitering"`, `"expected delivery"`, `"priority vip"`, `"trusted neighbor"`
+- Can be set via `SceneTracker.update_tags(conn, track_id=..., tags="...")`
+- Enables filtering and querying by behavioral/contextual markers
+
 
 #### `signal_rule`
 Intent classification rules (data-driven).

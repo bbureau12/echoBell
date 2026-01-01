@@ -268,3 +268,45 @@ event.concurrent_intents = ["technician_visit"]  # others already present
 - Would need to update old events when new entities arrive
 
 **Scene context queries** are cleaner and more flexible.
+
+## Future: Scene Track Tags
+
+The `scene_tracks` table now includes a `tags` field for future expansion.
+
+### Purpose
+Allow policies to mark tracks with behavioral/contextual labels:
+
+```python
+# After detecting suspicious behavior
+tracker.update_tags(conn, track_id=123, tags="suspicious loitering")
+
+# After recognizing expected visitor
+tracker.update_tags(conn, track_id=456, tags="expected delivery priority")
+
+# Clearing tags
+tracker.update_tags(conn, track_id=789, tags=None)
+```
+
+### Use Cases
+- **Behavioral tracking**: Mark tracks that linger too long, return frequently, etc.
+- **Priority handling**: Tag VIP visitors or emergency services
+- **Trust levels**: Mark trusted neighbors, known delivery personnel
+- **State management**: Track "awaiting_response", "engaged_conversation", etc.
+
+### Query Examples
+```sql
+-- Find all suspicious tracks
+SELECT * FROM scene_tracks 
+WHERE active=1 AND tags LIKE '%suspicious%';
+
+-- Find priority/VIP tracks
+SELECT * FROM scene_tracks 
+WHERE active=1 AND tags LIKE '%priority%';
+```
+
+### Implementation Notes
+- Tags are **space-separated keywords** (e.g., `"suspicious loitering"`)
+- **Not hierarchical** (no namespacing yet)
+- **Nullable** (most tracks won't have tags)
+- Can be updated at any time via `SceneTracker.update_tags()`
+- Consider future structured format (JSON) if complexity grows

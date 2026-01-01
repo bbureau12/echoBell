@@ -59,6 +59,7 @@ class TrackRow:
     last_box: Box | None
     raw_class: str | None
     color: str | None
+    tags: str | None = None
 
 
 def _box_to_json(b: Box) -> str:
@@ -111,6 +112,7 @@ class SceneTracker:
           raw_class      TEXT,
           color          TEXT,
           last_event_id  TEXT,
+          tags           TEXT,
           UNIQUE(camera_id, track_type, track_key)
         );
         """)
@@ -118,13 +120,17 @@ class SceneTracker:
         CREATE INDEX IF NOT EXISTS idx_scene_tracks_active
           ON scene_tracks(camera_id, track_type, active, last_seen_ts);
         """)
+        conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_scene_tracks_tags
+          ON scene_tracks(tags);
+        """)
         conn.commit()
 
     def _load_active_tracks(self, conn: sqlite3.Connection, *, camera_id: int, track_type: str) -> list[TrackRow]:
         rows = conn.execute(
             """
             SELECT id, camera_id, track_type, key_kind, track_key,
-                   first_seen_ts, last_seen_ts, active, last_box_json, raw_class, color
+                   first_seen_ts, last_seen_ts, active, last_box_json, raw_class, color, tags
             FROM scene_tracks
             WHERE camera_id=? AND track_type=? AND active=1
             """,
@@ -132,7 +138,7 @@ class SceneTracker:
         ).fetchall()
 
         out: list[TrackRow] = []
-        for (tid, cam, ttype, kind, tkey, fst, lst, active, box_json, raw_class, color) in rows:
+        for (tid, cam, ttype, kind, tkey, fst, lst, active, box_json, raw_class, color, tags) in rows:
             out.append(
                 TrackRow(
                     id=int(tid),
@@ -146,6 +152,7 @@ class SceneTracker:
                     last_box=_json_to_box(box_json),
                     raw_class=raw_class,
                     color=color,
+                    tags=tags,
                 )
             )
         return out
@@ -201,6 +208,32 @@ class SceneTracker:
             (now_ts, track_id),
         )
 
+    def update_tags(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        track_id: int,
+        tags: str | None,
+    ) -> None:
+        """
+        Update tags for a specific track.
+        
+        Tags are space-separated keywords for future expansion, e.g.:
+        - "suspicious loitering"
+        - "expected delivery"
+        - "priority vip"
+        - "trusted neighbor"
+        
+        Args:
+            conn: Database connection
+            track_id: The track ID to update
+            tags: Space-separated tag string, or None to clear tags
+        """
+        conn.execute(
+            "UPDATE scene_tracks SET tags=? WHERE id=?",
+            (tags, track_id),
+        )
+
     def get_currently_present(
         self,
         conn: sqlite3.Connection,
@@ -227,7 +260,7 @@ class SceneTracker:
             rows = conn.execute(
                 """
                 SELECT id, camera_id, track_type, key_kind, track_key,
-                       first_seen_ts, last_seen_ts, last_box, raw_class, color, last_event_id
+                       first_seen_ts, last_seen_ts, active, last_box_json, raw_class, color, tags
                 FROM scene_tracks
                 WHERE camera_id=? AND track_type=? AND active=1 AND last_seen_ts >= ?
                 ORDER BY last_seen_ts DESC
@@ -238,7 +271,7 @@ class SceneTracker:
             rows = conn.execute(
                 """
                 SELECT id, camera_id, track_type, key_kind, track_key,
-                       first_seen_ts, last_seen_ts, last_box, raw_class, color, last_event_id
+                       first_seen_ts, last_seen_ts, active, last_box_json, raw_class, color, tags
                 FROM scene_tracks
                 WHERE camera_id=? AND active=1 AND last_seen_ts >= ?
                 ORDER BY last_seen_ts DESC
@@ -255,12 +288,13 @@ class SceneTracker:
                 track_key=str(tkey),
                 first_seen_ts=int(fts),
                 last_seen_ts=int(lts),
+                active=int(active),
                 last_box=_json_to_box(lbox),
                 raw_class=str(rc) if rc else None,
                 color=str(col) if col else None,
-                last_event_id=int(eid) if eid else None,
+                tags=str(tags) if tags else None,
             )
-            for (rid, cid, ttype, kkind, tkey, fts, lts, lbox, rc, col, eid) in rows
+            for (rid, cid, ttype, kkind, tkey, fts, lts, active, lbox, rc, col, tags) in rows
         ]
 
     def update(
