@@ -8,10 +8,11 @@ sys.path.insert(0, project_root)
 
 from packages.perception.vision import snapshot_and_detect
 from packages.perception.asr import transcribe
-from packages.classify.intent import classify
+from packages.classify.classify_and_log import classify_and_log
 from packages.policy.loader import load_policies
 from packages.policy.apply import choose_action
 from packages.tts.piper import speak
+from packages.scene.scene_tracker import SceneTracker
 from storage.store import log_event
 
 # Get absolute paths for data files
@@ -20,10 +21,40 @@ DB = os.path.join(PROJECT_ROOT, "data", "doorbell.db")
 RTSP = os.path.join(PROJECT_ROOT, "data", "sherriff.jpg")
 MODE = "WORKING"  # later: read from DB
 
+# Initialize scene tracker for temporal awareness
+scene_tracker = SceneTracker(
+    iou_match_threshold=0.30,
+    grace_period_s=6
+)
+
 def handle_ring():
+    import sqlite3
+    conn = sqlite3.connect(DB)
+    
+    # Ensure scene tracker schema exists
+    scene_tracker.ensure_schema(conn)
+    
     policies = load_policies()
-    # OBSERVE
+    
+    # OBSERVE - get vision data
     vision = snapshot_and_detect(DB, RTSP)
+    
+    # CLASSIFY & LOG - with scene awareness
+    # This will:
+    # - Track vehicles/people entering/exiting
+    # - Link people to vehicles they arrived in
+    # - Detect license plates and link to vehicles
+    # - Generate scene.* evidence (vehicle_entered, person_present, etc.)
+    classified, event_id = classify_and_log(
+        conn=conn,
+        vision=vision,
+        transcript=None,  # Will get transcript below
+        camera_id=1,
+        mode=MODE,
+        scene_tracker=scene_tracker,
+    )
+    
+    # Log the initial motion event
     log_event(DB, etype="motion", mode=MODE, snapshot=vision.snapshot_path)
 
     # GREET
@@ -33,20 +64,29 @@ def handle_ring():
     # LISTEN
     asr = transcribe(seconds=4)
 
-    # INTERPRET
-    cls = classify(asr.text, vision)
+    # UPDATE with transcript - classify_and_log already handled intent classification
+    # Just update the event with the transcript if we got one
+    if asr.text:
+        conn.execute(
+            "UPDATE visitor_events SET transcript = ? WHERE event_id = ?",
+            (asr.text, event_id)
+        )
+        conn.commit()
 
-    # DECIDE
-    ctx = {"intent": cls.intent, "mode": MODE, "vision": vision}
+    # DECIDE - use the classified intent from classify_and_log
+    ctx = {"intent": classified.intent, "mode": MODE, "vision": vision}
     plan = choose_action(policies, ctx)
 
     # ACT
     if msg := plan.get("speak"):
         speak(msg)
 
-    # LOG
-    log_event(DB, etype="speak", intent=cls.intent, confidence=cls.conf, urgency=cls.urgency,
-              mode=MODE, snapshot=vision.snapshot_path, transcript=asr.text, actions=plan)
+    # LOG - use the classified data
+    log_event(DB, etype="speak", intent=classified.intent, confidence=classified.conf, 
+              urgency=classified.urgency, mode=MODE, snapshot=vision.snapshot_path, 
+              transcript=asr.text, actions=plan)
+    
+    conn.close()
 
 if __name__ == "__main__":
     print("Echo-Bell pre-LLM agent ready. Simulating a ring in 2s…")

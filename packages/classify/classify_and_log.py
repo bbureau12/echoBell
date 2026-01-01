@@ -10,6 +10,7 @@ from packages.classify.intent import classify, Classified
 from packages.data.visitor_memory import create_visitor_event, update_visitor_event_intent
 from packages.common.config_models import RetentionSettings
 from packages.scene.scene_tracker import SceneTracker, build_observations_from_vision
+from packages.scene import scene_linkage
 
 # NEW: only for typing; avoid hard import cycles
 from dataclasses import dataclass
@@ -157,6 +158,53 @@ def _update_scene_tracking(
         print(f"[SCENE] Added {len(scene_evidence)} scene tracking evidence entries")
 
 
+def _link_people_to_vehicles(
+    conn: sqlite3.Connection,
+    *,
+    vision: VisionResult,
+    camera_id: int,
+    now_ts: int,
+    event_id: str,
+    first_appearance_window_s: int = 3,
+) -> None:
+    """
+    Link people to vehicles they arrived with (first appearance only).
+    Adds evidence to vision result for classification.
+    """
+    try:
+        # Compute person-to-vehicle links
+        scene_linkage.ensure_schema(conn)
+        
+        links = scene_linkage.compute_visit_links_for_snapshot(
+            objects=vision.objects or [],
+            relation="arrived_with_vehicle",
+            conn=conn,
+            camera_id=camera_id,
+            now_ts=now_ts,
+            first_appearance_window_s=first_appearance_window_s,
+        )
+        
+        if links:
+            # Persist the links
+            count = scene_linkage.upsert_visit_links(
+                conn,
+                visit_id=event_id,
+                camera_id=camera_id,
+                now_ts=now_ts,
+                links=links,
+            )
+            print(f"[LINKAGE] Created {count} person-to-vehicle links")
+            
+            # Add evidence for classification
+            link_evidence = scene_linkage.links_to_evidence(links)
+            if link_evidence:
+                vision.evidence.extend(link_evidence)
+                print(f"[LINKAGE] Added {len(link_evidence)} linkage evidence entries")
+    except Exception as e:
+        # Don't fail the whole request if linkage fails
+        print(f"[LINKAGE] Warning: Person-to-vehicle linkage failed: {e}")
+
+
 def _save_visitor_snapshot(
     conn: sqlite3.Connection,
     *,
@@ -292,6 +340,17 @@ def classify_and_log(
             now_ts=now_ts,
             event_id=event_id,
         )
+
+        # 3a) Link people to vehicles (first appearance only)
+        if camera_id is not None:
+            _link_people_to_vehicles(
+                conn,
+                vision=vision,
+                camera_id=camera_id,
+                now_ts=now_ts,
+                event_id=event_id,
+                first_appearance_window_s=3,  # 3 second window for "just arrived"
+            )
 
         # 4) Save visitor snapshot if applicable
         _save_visitor_snapshot(

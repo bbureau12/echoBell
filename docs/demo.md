@@ -137,25 +137,89 @@ capabilities. The demo is designed to be completed in approximately 5 minutes.
 
 **What happens**
 - A vehicle enters the camera view and remains present for several seconds.
+- License plate is detected and tracked using plate_hmac as the vehicle's identity.
 - No person is initially visible.
-- After a short dwell period, a person exits the vehicle.
-- The vehicle later leaves the scene.
+- After a short dwell period (≤3 seconds), a person exits the vehicle.
+- The person is linked to the vehicle they arrived in.
+- The vehicle later leaves the scene (not detected for 6+ seconds).
 
 **Scene evidence emitted**
-- scene.vehicle_entered = true
-- scene.vehicle_present = true
-- scene.vehicle_dwell_s > threshold
-- scene.person_entered = true
-- scene.vehicle_exited = true
+- `scene.vehicle_entered = 1` - Vehicle first appears
+- `scene.vehicle_present = true` - Vehicle currently in frame
+- `scene.vehicle_count = 1` - Number of vehicles present
+- `scene.person_entered = 1` - Person exits vehicle
+- `scene.person_present = true` - Person detected
+- `scene.vehicle_exited = 1` - Vehicle leaves (after grace period)
+
+**Database records created**
+- `scene_tracks` table:
+  - Track with `track_key=plate_hmac` for the vehicle (persistent ID)
+  - Track with `track_key=visitor_id` for the person (if recognized)
+  - Tracks include `first_seen_ts`, `last_seen_ts`, bounding box, color
+- `visit_entity_links` table:
+  - Links person to vehicle (only if person appeared within 3 seconds of vehicle)
+  - Evidence: `person_linked.vehicle_plate` with plate_hmac
 
 **Result**
 - Events are created even when no visitor is initially present.
 - Temporal evidence is attached to events and consumed by the classifier.
 - Intent inference is informed by *change over time*, not a single frame.
+- Person-to-vehicle association enables:
+  - "Who arrived in which car?"
+  - "This person came in a delivery truck" → boost delivery intent
+  - "Known resident arrived in unknown vehicle" → boost visitor intent
 
 **What this demonstrates**
-- Vision is stateless and frame-based.
-- Sc
+- **Temporal tracking** - System maintains state across frames (6s grace period)
+- **Entry/exit detection** - Knows when entities arrive and leave
+- **Identity persistence** - Vehicles tracked by plate_hmac, not ephemeral IDs
+- **Upgrade logic** - If plate detected after vehicle appears, temp track upgraded to plate_hmac
+- **Contextual linking** - People associated with vehicles only on arrival (not passersby)
+- **First-appearance window** - 3-second window prevents false associations
+- **Scene queries** - External systems can query "what's currently present?" using `get_currently_present()`
+
+**Temporal tracking details**
+- **IoU matching** - Objects matched across frames using Intersection over Union (threshold: 0.30)
+- **Strong key priority** - plate_hmac/visitor_id matched first, IoU fallback for unknowns
+- **Grace period** - Tracks marked exited only after 6s without detection (prevents false exits)
+- **Track upgrade** - Temp tracks upgraded to plate_hmac when plate detected on subsequent frames
+
+**Privacy considerations**
+- Plate stored as HMAC (plate_hmac), not raw text
+- Vehicle tracking uses cryptographic hash, not identifying information
+- Person-vehicle links use anonymized identifiers
+- Bounding boxes stored for scene analysis, not full frames
+
+
+---
+
+## Scenario 6: Multi-vehicle scene with selective tracking
+
+**What happens**
+- Two vehicles present: one with readable plate, one without
+- System creates two tracks:
+  - Track 1: `key_kind=plate`, `track_key=<plate_hmac>` (stable, persistent)
+  - Track 2: `key_kind=iou`, `track_key=temp:<uuid>` (ephemeral, IoU-based)
+- Both vehicles are counted in scene evidence
+- Only the plated vehicle generates plate history and visitor associations
+
+**Evidence**
+- `scene.vehicle_count = 2`
+- `scene.vehicle_present = true`
+- `ocr.plate_text = "ABC123"` (only for readable plate)
+- `plate_history.intent = "delivery"` (if this plate has history)
+
+**Result**
+- System handles mixed scenarios gracefully
+- Vehicles without plates still tracked for scene awareness
+- Vehicles with plates get stable identity for history/policy decisions
+- Scene count remains accurate regardless of plate detection
+
+**What this demonstrates**
+- Fallback tracking strategies (plate → IoU → temp key)
+- Stable identity when available, tracking when not
+- Scene awareness independent of identification
+- Multi-entity handling within same frame
 
 
 ---
@@ -166,3 +230,7 @@ capabilities. The demo is designed to be completed in approximately 5 minutes.
 - Intent confidence boosting via multi-signal evidence
 - Plate history influencing policy decisions (known delivery = auto-accept)
 - Multiple plate candidate handling (select best, ignore noise)
+- Scene-based policy triggers ("If vehicle present for >30s without person, alert")
+- Vehicle dwell time analysis (suspicious loitering detection)
+- Multi-camera scene fusion (track vehicles across camera views)
+

@@ -201,6 +201,68 @@ class SceneTracker:
             (now_ts, track_id),
         )
 
+    def get_currently_present(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        camera_id: int,
+        track_type: str | None = None,
+        now_ts: int | None = None,
+    ) -> list[TrackRow]:
+        """
+        Get tracks that are CURRENTLY present (seen within grace period).
+        This is what external systems should use to check current scene state.
+        
+        Returns only tracks where:
+        - active=1 AND
+        - last_seen_ts is within grace_period_s of now_ts
+        """
+        if now_ts is None:
+            import time
+            now_ts = int(time.time())
+        
+        cutoff = now_ts - self.grace_period_s
+        
+        if track_type:
+            rows = conn.execute(
+                """
+                SELECT id, camera_id, track_type, key_kind, track_key,
+                       first_seen_ts, last_seen_ts, last_box, raw_class, color, last_event_id
+                FROM scene_tracks
+                WHERE camera_id=? AND track_type=? AND active=1 AND last_seen_ts >= ?
+                ORDER BY last_seen_ts DESC
+                """,
+                (camera_id, track_type, cutoff),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, camera_id, track_type, key_kind, track_key,
+                       first_seen_ts, last_seen_ts, last_box, raw_class, color, last_event_id
+                FROM scene_tracks
+                WHERE camera_id=? AND active=1 AND last_seen_ts >= ?
+                ORDER BY last_seen_ts DESC
+                """,
+                (camera_id, cutoff),
+            ).fetchall()
+        
+        return [
+            TrackRow(
+                id=int(rid),
+                camera_id=int(cid),
+                track_type=str(ttype),
+                key_kind=str(kkind),
+                track_key=str(tkey),
+                first_seen_ts=int(fts),
+                last_seen_ts=int(lts),
+                last_box=_json_to_box(lbox),
+                raw_class=str(rc) if rc else None,
+                color=str(col) if col else None,
+                last_event_id=int(eid) if eid else None,
+            )
+            for (rid, cid, ttype, kkind, tkey, fts, lts, lbox, rc, col, eid) in rows
+        ]
+
     def update(
         self,
         conn: sqlite3.Connection,
@@ -241,6 +303,7 @@ class SceneTracker:
                 if track_type == "vehicle" and obs.plate_hmac:
                     strong_key = obs.plate_hmac
                     strong_kind = "plate"
+                    print(f"[SceneTracker] Vehicle observation has plate_hmac: {strong_key[:20]}")
                 elif track_type == "person" and obs.visitor_id:
                     strong_key = obs.visitor_id
                     strong_kind = "visitor"
@@ -291,6 +354,7 @@ class SceneTracker:
                     if strong_key and best.track_key.startswith("temp:"):
                         # mark old temp track inactive and create new keyed track (simple v1)
                         # (keeps UNIQUE constraint simple)
+                        print(f"[SceneTracker] Upgrading temp track {best.track_key[:20]} to {strong_kind}={strong_key[:20]}")
                         self._mark_exited(conn, track_id=best.id, now_ts=now_ts)
                         self._insert_track(
                             conn,
@@ -307,21 +371,38 @@ class SceneTracker:
                         entered += 1
                     continue
 
-                # 3) New track
-                temp_key = f"temp:{uuid.uuid4().hex}"
-                self._insert_track(
-                    conn,
-                    camera_id=camera_id,
-                    track_type=track_type,
-                    key_kind="iou",
-                    track_key=temp_key,
-                    now_ts=now_ts,
-                    box=obs.box,
-                    raw_class=obs.raw_class,
-                    color=obs.color,
-                    last_event_id=event_id,
-                )
-                entered += 1
+                # 3) New track - use strong key if available, otherwise temp key
+                if strong_key:
+                    # New track with plate/visitor ID
+                    self._insert_track(
+                        conn,
+                        camera_id=camera_id,
+                        track_type=track_type,
+                        key_kind=strong_kind or "strong",
+                        track_key=strong_key,
+                        now_ts=now_ts,
+                        box=obs.box,
+                        raw_class=obs.raw_class,
+                        color=obs.color,
+                        last_event_id=event_id,
+                    )
+                    entered += 1
+                else:
+                    # New track with temporary IoU-based key
+                    temp_key = f"temp:{uuid.uuid4().hex}"
+                    self._insert_track(
+                        conn,
+                        camera_id=camera_id,
+                        track_type=track_type,
+                        key_kind="iou",
+                        track_key=temp_key,
+                        now_ts=now_ts,
+                        box=obs.box,
+                        raw_class=obs.raw_class,
+                        color=obs.color,
+                        last_event_id=event_id,
+                    )
+                    entered += 1
 
             # 4) Exit tracks that were not matched, after grace period
             exited = 0
