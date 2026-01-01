@@ -37,7 +37,7 @@ def iou(a: Box, b: Box) -> float:
 
 @dataclass(frozen=True)
 class Observation:
-    track_type: str            # 'vehicle' | 'person'
+    track_type: str            # 'vehicle' | 'person' | 'package'
     box: Box
     raw_class: str | None = None
     color: str | None = None
@@ -310,14 +310,14 @@ class SceneTracker:
         Update scene tracks with current frame observations and return scene Evidence.
         """
         # Group observations by type
-        obs_by_type: dict[str, list[Observation]] = {"vehicle": [], "person": []}
+        obs_by_type: dict[str, list[Observation]] = {"vehicle": [], "person": [], "package": []}
         for o in observations:
             if o.track_type in obs_by_type:
                 obs_by_type[o.track_type].append(o)
 
         evidence: list[Evidence] = []
 
-        for track_type in ("vehicle", "person"):
+        for track_type in ("vehicle", "person", "package"):
             active_tracks = self._load_active_tracks(conn, camera_id=camera_id, track_type=track_type)
             matched_track_ids: set[int] = set()
 
@@ -479,7 +479,7 @@ def build_observations_from_vision(
     obs: list[Observation] = []
     for o in (vr.objects or []):
         label = (o.label or "").lower()
-        if label not in ("vehicle", "person"):
+        if label not in ("vehicle", "person", "package"):
             continue
 
         # If you add this in vision: obj.props["raw_class"] = det.cls.lower()
@@ -491,7 +491,7 @@ def build_observations_from_vision(
 
         if label == "vehicle":
             plate_hmac = plate_hmac_by_object_id.get(int(o.object_id)) if o.object_id is not None else None
-        else:
+        elif label == "person":
             visitor_id = o.props.get("visitor_id") if getattr(o, "props", None) else None
 
         obs.append(

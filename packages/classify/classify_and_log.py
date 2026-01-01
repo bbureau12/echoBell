@@ -308,6 +308,99 @@ def _link_people_to_vehicles(
     except Exception as e:
         # Don't fail the whole request if linkage fails
         print(f"[LINKAGE] Warning: Person-to-vehicle linkage failed: {e}")
+    
+    # PHASE 1c2: Link packages to people (carrying detection)
+    try:
+        package_links = scene_linkage.compute_package_to_person_links(
+            objects=vision.objects or [],
+            conn=conn,
+            camera_id=camera_id,
+            now_ts=now_ts,
+            relation="carrying_package",
+            first_appearance_window_s=first_appearance_window_s,
+        )
+        
+        if package_links:
+            # Persist the links
+            count = scene_linkage.upsert_visit_links(
+                conn,
+                visit_id=event_id,
+                camera_id=camera_id,
+                now_ts=now_ts,
+                links=package_links,
+            )
+            print(f"[LINKAGE] Created {count} package-to-person links")
+            
+            # Add evidence for classification
+            pkg_evidence = scene_linkage.links_to_evidence(package_links)
+            if pkg_evidence:
+                vision.evidence.extend(pkg_evidence)
+                print(f"[LINKAGE] Added {len(pkg_evidence)} package linkage evidence entries")
+    except Exception as e:
+        # Don't fail the whole request if linkage fails
+        print(f"[LINKAGE] Warning: Package-to-person linkage failed: {e}")
+    
+    # PHASE 1c3: Detect package pickups (person takes existing package)
+    try:
+        pickup_links = scene_linkage.detect_package_pickup(
+            objects=vision.objects or [],
+            conn=conn,
+            camera_id=camera_id,
+            now_ts=now_ts,
+            relation="picked_up_package",
+            min_dwell_time_s=2,  # Package must be in bbox for 2+ seconds
+        )
+        
+        if pickup_links:
+            # Persist the links
+            count = scene_linkage.upsert_visit_links(
+                conn,
+                visit_id=event_id,
+                camera_id=camera_id,
+                now_ts=now_ts,
+                links=pickup_links,
+            )
+            print(f"[LINKAGE] Detected {count} package pickup events")
+            
+            # Add evidence for classification
+            pickup_evidence = scene_linkage.links_to_evidence(pickup_links)
+            if pickup_evidence:
+                vision.evidence.extend(pickup_evidence)
+                print(f"[LINKAGE] Added {len(pickup_evidence)} pickup evidence entries")
+    except Exception as e:
+        # Don't fail the whole request if linkage fails
+        print(f"[LINKAGE] Warning: Package pickup detection failed: {e}")
+    
+    # PHASE 1c4: Detect package drop-offs (person leaves package)
+    try:
+        dropoff_links = scene_linkage.detect_package_dropoff(
+            objects=vision.objects or [],
+            conn=conn,
+            camera_id=camera_id,
+            now_ts=now_ts,
+            relation="dropped_off_package",
+            min_separation_time_s=2,  # Package must be separated for 2+ seconds
+        )
+        
+        if dropoff_links:
+            # Persist the links
+            count = scene_linkage.upsert_visit_links(
+                conn,
+                visit_id=event_id,
+                camera_id=camera_id,
+                now_ts=now_ts,
+                links=dropoff_links,
+            )
+            print(f"[LINKAGE] Detected {count} package drop-off events")
+            
+            # Add evidence for classification
+            dropoff_evidence = scene_linkage.links_to_evidence(dropoff_links)
+            if dropoff_evidence:
+                vision.evidence.extend(dropoff_evidence)
+                print(f"[LINKAGE] Added {len(dropoff_evidence)} drop-off evidence entries")
+    except Exception as e:
+        # Don't fail the whole request if linkage fails
+        print(f"[LINKAGE] Warning: Package drop-off detection failed: {e}")
 
 
 def _save_visitor_snapshot(

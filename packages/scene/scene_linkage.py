@@ -86,6 +86,27 @@ def _wh(box: tuple[int, int, int, int]) -> tuple[float, float]:
     x1, y1, x2, y2 = box
     return (max(1.0, float(x2 - x1)), max(1.0, float(y2 - y1)))
 
+def _bbox_area(box: tuple[int, int, int, int]) -> float:
+    x1, y1, x2, y2 = box
+    return max(0.0, float(x2 - x1) * float(y2 - y1))
+
+def _intersection_area(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    return max(0.0, float(ix2 - ix1) * float(iy2 - iy1))
+
+def _json_to_box(s: str | None) -> tuple[int, int, int, int] | None:
+    """Convert JSON string to box tuple."""
+    if not s:
+        return None
+    try:
+        o = json.loads(s)
+        return (int(o["x1"]), int(o["y1"]), int(o["x2"]), int(o["y2"]))
+    except Exception:
+        return None
+
 def _dist(a: tuple[float, float], b: tuple[float, float]) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
@@ -95,6 +116,7 @@ def _clamp01(x: float) -> float:
 def _exp_falloff(x: float, k: float = 1.0) -> float:
     # x=0 -> 1, x=1 -> ~0.368 when k=1
     return math.exp(-k * x)
+
 
 
 # -----------------------------
@@ -274,6 +296,699 @@ def compute_visit_links_for_snapshot(
             )
         )
 
+    return links
+
+
+def compute_package_to_person_links(
+    *,
+    objects: list,  # list[SceneObject]
+    conn: sqlite3.Connection,
+    camera_id: int,
+    now_ts: int,
+    relation: str = "carrying_package",
+    first_appearance_window_s: int = 3,
+    min_confidence: float = 0.50,
+) -> list[VisitEntityLink]:
+    """
+    Link packages to people if the package FIRST APPEARS inside a person's bounding box.
+    
+    Constraints:
+    - Package must be NEW (first_seen_ts within first_appearance_window_s)
+    - Package bbox must be INSIDE person bbox (fully contained)
+    - Package must be SMALLER than person (prevents false positives)
+    
+    Use cases:
+    - Delivery person arriving WITH package (delivery_person intent)
+    - Porch pirate leaving WITHOUT package they arrived with
+    - Neighbor bringing package to your door
+    
+    Args:
+        objects: List of SceneObject from vision
+        conn: Database connection (for checking first_seen_ts from scene_tracks)
+        camera_id: Camera ID
+        now_ts: Current timestamp
+        relation: Relationship type (default "carrying_package")
+        first_appearance_window_s: Only link if package appeared within this window
+        min_confidence: Minimum confidence threshold
+    
+    Returns:
+        List of VisitEntityLink objects linking packages to people
+    """
+    persons = [o for o in objects if (getattr(o, "label", "") or "").lower() == "person" and getattr(o, "box", None)]
+    packages = [o for o in objects if (getattr(o, "label", "") or "").lower() == "package" and getattr(o, "box", None)]
+    
+    if not persons or not packages:
+        return []
+    
+    # Get package first_seen_ts from scene_tracks
+    package_first_seen = {}
+    for pkg in packages:
+        pkg_id = getattr(pkg, "object_id", None)
+        if pkg_id is None:
+            continue
+        
+        # Query scene_tracks for this package
+        row = conn.execute(
+            """
+            SELECT first_seen_ts, track_key
+            FROM scene_tracks
+            WHERE camera_id=? AND track_type='package' AND active=1
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (camera_id,)
+        ).fetchone()
+        
+        if row:
+            package_first_seen[int(pkg_id)] = int(row[0])
+    
+    links: list[VisitEntityLink] = []
+    cutoff_ts = now_ts - first_appearance_window_s
+    
+    for pkg in packages:
+        pkg_id = getattr(pkg, "object_id", None)
+        if pkg_id is None:
+            continue
+        
+        # Only link packages that JUST appeared
+        first_ts = package_first_seen.get(int(pkg_id))
+        if first_ts is None or first_ts < cutoff_ts:
+            continue
+        
+        pkg_box = getattr(pkg, "box")
+        pkg_x1, pkg_y1, pkg_x2, pkg_y2 = pkg_box
+        pkg_area = _bbox_area(pkg_box)
+        
+        # Find person whose bbox CONTAINS this package
+        best_person = None
+        best_containment = 0.0
+        
+        for person in persons:
+            person_box = getattr(person, "box")
+            person_x1, person_y1, person_x2, person_y2 = person_box
+            person_area = _bbox_area(person_box)
+            
+            # Package must be SMALLER than person
+            if pkg_area >= person_area:
+                continue
+            
+            # Check if package is INSIDE person bbox
+            is_inside = (
+                pkg_x1 >= person_x1 and
+                pkg_y1 >= person_y1 and
+                pkg_x2 <= person_x2 and
+                pkg_y2 <= person_y2
+            )
+            
+            if not is_inside:
+                continue
+            
+            # Calculate containment score (how well package fits inside person)
+            # Higher score = package is more centered / better contained
+            containment = _intersection_area(pkg_box, person_box) / pkg_area if pkg_area > 0 else 0.0
+            
+            if containment > best_containment:
+                best_containment = containment
+                best_person = person
+        
+        if best_person is None or best_containment < min_confidence:
+            continue
+        
+        # Get object IDs and detector confidences
+        person_id = getattr(best_person, "object_id", None)
+        if person_id is None:
+            continue
+        
+        person_det_conf = getattr(best_person, "conf", 0.9)
+        pkg_det_conf = getattr(pkg, "conf", 0.9)
+        
+        # Final confidence: mix containment with detector confidences
+        final_conf = best_containment * person_det_conf * pkg_det_conf
+        
+        if final_conf < min_confidence:
+            continue
+        
+        # Get visitor_id if available
+        visitor_id = None
+        try:
+            visitor_id = getattr(best_person, "props", {}).get("visitor_id")
+        except Exception:
+            pass
+        
+        links.append(
+            VisitEntityLink(
+                relation=relation,
+                confidence=float(_clamp01(final_conf)),
+                subject_type="person",
+                subject_object_id=int(person_id),
+                subject_key=str(visitor_id) if visitor_id else None,
+                subject_meta={
+                    "person_conf": float(person_det_conf),
+                },
+                object_type="package",
+                object_object_id=int(pkg_id),
+                object_key=None,  # Packages don't have stable keys
+                object_meta={
+                    "package_conf": float(pkg_det_conf),
+                    "containment": float(best_containment),
+                    "pkg_area": float(pkg_area),
+                    "person_area": float(_bbox_area(best_person.box)),
+                },
+                notes="package_first_appeared_inside_person_bbox",
+            )
+        )
+    
+    return links
+
+
+def detect_package_pickup(
+    *,
+    objects: list,  # list[SceneObject]
+    conn: sqlite3.Connection,
+    camera_id: int,
+    now_ts: int,
+    relation: str = "picked_up_package",
+    min_dwell_time_s: int = 2,
+    min_confidence: float = 0.60,
+) -> list[VisitEntityLink]:
+    """
+    Detect when someone picks up a package that was already on the ground.
+    
+    Detection logic:
+    1. Package existed BEFORE person arrived (not carrying_package)
+    2. Package is now INSIDE person's bbox
+    3. Package has been inside person's bbox for >= min_dwell_time_s
+    
+    This differentiates:
+    - Delivery person (arrives WITH package) vs Porch pirate (picks UP existing package)
+    - Homeowner retrieving their delivery vs Thief stealing package
+    
+    Uses scene_tracks to determine:
+    - Package age (first_seen_ts)
+    - Person age (first_seen_ts)
+    - How long package has been contained (via tags tracking)
+    
+    Args:
+        objects: List of SceneObject from vision
+        conn: Database connection
+        camera_id: Camera ID
+        now_ts: Current timestamp
+        relation: Relationship type (default "picked_up_package")
+        min_dwell_time_s: Package must be inside person bbox for this long
+        min_confidence: Minimum confidence threshold
+    
+    Returns:
+        List of VisitEntityLink for pickup events
+    """
+    persons = [o for o in objects if (getattr(o, "label", "") or "").lower() == "person" and getattr(o, "box", None)]
+    packages = [o for o in objects if (getattr(o, "label", "") or "").lower() == "package" and getattr(o, "box", None)]
+    
+    if not persons or not packages:
+        return []
+    
+    # Get package and person first_seen_ts from scene_tracks
+    package_info = {}  # pkg_id -> {first_seen_ts, track_id, track_key, tags}
+    person_info = {}   # person_id -> {first_seen_ts, track_id, visitor_id}
+    
+    for pkg in packages:
+        pkg_id = getattr(pkg, "object_id", None)
+        if pkg_id is None:
+            continue
+        
+        # Find this package's track (match by most recent for this camera)
+        rows = conn.execute(
+            """
+            SELECT id, first_seen_ts, track_key, tags
+            FROM scene_tracks
+            WHERE camera_id=? AND track_type='package' AND active=1
+            ORDER BY last_seen_ts DESC
+            LIMIT 5
+            """,
+            (camera_id,)
+        ).fetchall()
+        
+        # Simple heuristic: use the most recent package track
+        # (In future, could match by IoU with pkg.box)
+        if rows:
+            package_info[int(pkg_id)] = {
+                "first_seen_ts": int(rows[0][1]),
+                "track_id": int(rows[0][0]),
+                "track_key": str(rows[0][2]),
+                "tags": str(rows[0][3]) if rows[0][3] else "",
+            }
+    
+    for person in persons:
+        person_id = getattr(person, "object_id", None)
+        if person_id is None:
+            continue
+        
+        # Get visitor_id if available
+        visitor_id = None
+        try:
+            visitor_id = getattr(person, "props", {}).get("visitor_id")
+        except Exception:
+            pass
+        
+        if not visitor_id:
+            continue
+        
+        # Find this person's track
+        row = conn.execute(
+            """
+            SELECT id, first_seen_ts
+            FROM scene_tracks
+            WHERE camera_id=? AND track_type='person' AND track_key=? AND active=1
+            ORDER BY last_seen_ts DESC
+            LIMIT 1
+            """,
+            (camera_id, visitor_id)
+        ).fetchone()
+        
+        if row:
+            person_info[int(person_id)] = {
+                "first_seen_ts": int(row[1]),
+                "track_id": int(row[0]),
+                "visitor_id": str(visitor_id),
+            }
+    
+    links: list[VisitEntityLink] = []
+    
+    for pkg in packages:
+        pkg_id = getattr(pkg, "object_id", None)
+        if pkg_id is None or int(pkg_id) not in package_info:
+            continue
+        
+        pkg_box = getattr(pkg, "box")
+        pkg_info = package_info[int(pkg_id)]
+        pkg_first_seen = pkg_info["first_seen_ts"]
+        pkg_area = _bbox_area(pkg_box)
+        
+        # Find person whose bbox CONTAINS this package
+        best_person = None
+        best_containment = 0.0
+        best_person_info = None
+        
+        for person in persons:
+            person_id = getattr(person, "object_id", None)
+            if person_id is None or int(person_id) not in person_info:
+                continue
+            
+            person_box = getattr(person, "box")
+            person_area = _bbox_area(person_box)
+            person_pinfo = person_info[int(person_id)]
+            person_first_seen = person_pinfo["first_seen_ts"]
+            
+            # KEY CHECK: Package must have existed BEFORE person arrived
+            # (If person arrived first, they're delivering, not picking up)
+            if pkg_first_seen >= person_first_seen:
+                continue
+            
+            # Package must be SMALLER than person
+            if pkg_area >= person_area:
+                continue
+            
+            # Check if package is INSIDE person bbox
+            pkg_x1, pkg_y1, pkg_x2, pkg_y2 = pkg_box
+            person_x1, person_y1, person_x2, person_y2 = person_box
+            
+            is_inside = (
+                pkg_x1 >= person_x1 and
+                pkg_y1 >= person_y1 and
+                pkg_x2 <= person_x2 and
+                pkg_y2 <= person_y2
+            )
+            
+            if not is_inside:
+                continue
+            
+            # Calculate containment score
+            containment = _intersection_area(pkg_box, person_box) / pkg_area if pkg_area > 0 else 0.0
+            
+            if containment > best_containment:
+                best_containment = containment
+                best_person = person
+                best_person_info = person_pinfo
+        
+        if best_person is None or best_containment < min_confidence:
+            continue
+        
+        # Check dwell time using tags
+        # Tags format: "contained_by:<visitor_id>_since:<timestamp>"
+        tags = pkg_info["tags"]
+        contained_duration = 0
+        
+        if tags and "contained_by:" in tags:
+            # Parse tags to find when containment started
+            try:
+                parts = tags.split()
+                for part in parts:
+                    if part.startswith("contained_since:"):
+                        contained_since = int(part.split(":")[1])
+                        contained_duration = now_ts - contained_since
+                        break
+            except Exception:
+                pass
+        
+        # If not tagged yet, or if person changed, update tags and skip (wait for next frame)
+        expected_tag = f"contained_by:{best_person_info['visitor_id']} contained_since:{now_ts}"
+        if not tags or "contained_by:" not in tags or contained_duration == 0:
+            # First time seeing this package contained - tag it and wait
+            try:
+                conn.execute(
+                    "UPDATE scene_tracks SET tags=? WHERE id=?",
+                    (f"contained_by:{best_person_info['visitor_id']} contained_since:{now_ts}", pkg_info["track_id"])
+                )
+                conn.commit()
+            except Exception as e:
+                print(f"[PICKUP] Warning: Failed to tag package: {e}")
+            continue
+        
+        # Check if dwell time threshold met
+        if contained_duration < min_dwell_time_s:
+            continue  # Not long enough yet
+        
+        # PICKUP DETECTED!
+        person_id = getattr(best_person, "object_id", None)
+        person_det_conf = getattr(best_person, "conf", 0.9)
+        pkg_det_conf = getattr(pkg, "conf", 0.9)
+        
+        # Confidence: containment * detector confs * time factor
+        time_factor = min(1.0, contained_duration / (min_dwell_time_s * 2))  # Maxes at 2x min_dwell
+        final_conf = best_containment * person_det_conf * pkg_det_conf * time_factor
+        
+        if final_conf < min_confidence:
+            continue
+        
+        links.append(
+            VisitEntityLink(
+                relation=relation,
+                confidence=float(_clamp01(final_conf)),
+                subject_type="person",
+                subject_object_id=int(person_id),
+                subject_key=best_person_info["visitor_id"],
+                subject_meta={
+                    "person_conf": float(person_det_conf),
+                    "person_age_s": now_ts - best_person_info["first_seen_ts"],
+                },
+                object_type="package",
+                object_object_id=int(pkg_id),
+                object_key=None,
+                object_meta={
+                    "package_conf": float(pkg_det_conf),
+                    "package_age_s": now_ts - pkg_first_seen,
+                    "containment": float(best_containment),
+                    "dwell_time_s": contained_duration,
+                },
+                notes=f"package_picked_up_after_{contained_duration}s_dwell",
+            )
+        )
+    
+    return links
+
+
+def detect_package_dropoff(
+    *,
+    objects: list,  # list[SceneObject]
+    conn: sqlite3.Connection,
+    camera_id: int,
+    now_ts: int,
+    relation: str = "dropped_off_package",
+    min_separation_time_s: int = 2,
+    max_separation_distance: float = 2.0,  # meters (heuristic: ~2 box widths)
+    min_confidence: float = 0.60,
+) -> list[VisitEntityLink]:
+    """
+    Detect when someone drops off a package (delivery scenario).
+    
+    Detection logic:
+    1. Package has "carrying_package" link (person arrived WITH it)
+    2. Package is now OUTSIDE person's bbox (separated)
+    3. Package has been outside person's bbox for >= min_separation_time_s
+    4. Package is stationary (not moving with person)
+    
+    This detects:
+    - Delivery person leaving package at door
+    - Neighbor dropping off package
+    - Mail carrier leaving parcel
+    
+    Uses scene_tracks tags to track separation state:
+    - "separated_from:<visitor_id>_since:<timestamp>"
+    
+    Args:
+        objects: List of SceneObject from vision
+        conn: Database connection
+        camera_id: Camera ID
+        now_ts: Current timestamp
+        relation: Relationship type (default "dropped_off_package")
+        min_separation_time_s: Package must be separated for this long
+        max_separation_distance: Max distance (in normalized units) to still consider "near"
+        min_confidence: Minimum confidence threshold
+    
+    Returns:
+        List of VisitEntityLink for drop-off events
+    """
+    persons = [o for o in objects if (getattr(o, "label", "") or "").lower() == "person" and getattr(o, "box", None)]
+    packages = [o for o in objects if (getattr(o, "label", "") or "").lower() == "package" and getattr(o, "box", None)]
+    
+    if not persons or not packages:
+        return []
+    
+    # Get packages that were carried (have carrying_package links)
+    # We need to check visit_entity_links to see which packages were being carried
+    carried_packages = {}  # pkg_track_key -> {person_visitor_id, link_created_ts}
+    
+    try:
+        # Query recent carrying_package links for this camera
+        rows = conn.execute(
+            """
+            SELECT object_type, object_object_id, subject_key, created_ts, object_meta_json
+            FROM visit_entity_links
+            WHERE camera_id=? 
+              AND relation='carrying_package'
+              AND created_ts >= ?
+            ORDER BY created_ts DESC
+            LIMIT 50
+            """,
+            (camera_id, now_ts - 300)  # Last 5 minutes
+        ).fetchall()
+        
+        for row in rows:
+            obj_type, obj_id, subj_key, created_ts, obj_meta = row
+            if obj_type == "package" and subj_key:
+                # Note: We store by object_id, but packages have temp track_keys
+                # We'll match by proximity later
+                carried_packages[int(obj_id)] = {
+                    "person_visitor_id": str(subj_key),
+                    "link_created_ts": int(created_ts),
+                }
+    except Exception as e:
+        print(f"[DROPOFF] Warning: Failed to query carrying links: {e}")
+        return []
+    
+    # Get package and person info from scene_tracks
+    package_info = {}  # pkg_id -> {track_id, track_key, tags, first_seen_ts, last_box}
+    person_info = {}   # person_id -> {visitor_id, track_id, first_seen_ts}
+    
+    for pkg in packages:
+        pkg_id = getattr(pkg, "object_id", None)
+        if pkg_id is None:
+            continue
+        
+        rows = conn.execute(
+            """
+            SELECT id, track_key, tags, first_seen_ts, last_box_json
+            FROM scene_tracks
+            WHERE camera_id=? AND track_type='package' AND active=1
+            ORDER BY last_seen_ts DESC
+            LIMIT 5
+            """,
+            (camera_id,)
+        ).fetchall()
+        
+        if rows:
+            package_info[int(pkg_id)] = {
+                "track_id": int(rows[0][0]),
+                "track_key": str(rows[0][1]),
+                "tags": str(rows[0][2]) if rows[0][2] else "",
+                "first_seen_ts": int(rows[0][3]),
+                "last_box": _json_to_box(rows[0][4]) if rows[0][4] else None,
+            }
+    
+    for person in persons:
+        person_id = getattr(person, "object_id", None)
+        if person_id is None:
+            continue
+        
+        visitor_id = None
+        try:
+            visitor_id = getattr(person, "props", {}).get("visitor_id")
+        except Exception:
+            pass
+        
+        if not visitor_id:
+            continue
+        
+        row = conn.execute(
+            """
+            SELECT id, first_seen_ts
+            FROM scene_tracks
+            WHERE camera_id=? AND track_type='person' AND track_key=? AND active=1
+            ORDER BY last_seen_ts DESC
+            LIMIT 1
+            """,
+            (camera_id, visitor_id)
+        ).fetchone()
+        
+        if row:
+            person_info[int(person_id)] = {
+                "visitor_id": str(visitor_id),
+                "track_id": int(row[0]),
+                "first_seen_ts": int(row[1]),
+            }
+    
+    links: list[VisitEntityLink] = []
+    
+    for pkg in packages:
+        pkg_id = getattr(pkg, "object_id", None)
+        if pkg_id is None or int(pkg_id) not in package_info:
+            continue
+        
+        # Check if this package was being carried
+        if int(pkg_id) not in carried_packages:
+            continue
+        
+        pkg_box = getattr(pkg, "box")
+        pkg_info = package_info[int(pkg_id)]
+        carry_info = carried_packages[int(pkg_id)]
+        carrier_visitor_id = carry_info["person_visitor_id"]
+        
+        # Find the person who was carrying it
+        carrier_person = None
+        carrier_person_info = None
+        
+        for person in persons:
+            person_id = getattr(person, "object_id", None)
+            if person_id is None or int(person_id) not in person_info:
+                continue
+            
+            pinfo = person_info[int(person_id)]
+            if pinfo["visitor_id"] == carrier_visitor_id:
+                carrier_person = person
+                carrier_person_info = pinfo
+                break
+        
+        if carrier_person is None:
+            # Person who was carrying has left the scene - STRONG dropoff signal!
+            # But we can't create a link without the person object_id
+            # Instead, just log it
+            print(f"[DROPOFF] Package {pkg_id} carrier left scene - package dropped off")
+            continue
+        
+        # Person is still in scene - check if package separated
+        person_box = getattr(carrier_person, "box")
+        
+        # Check if package is OUTSIDE person bbox
+        pkg_x1, pkg_y1, pkg_x2, pkg_y2 = pkg_box
+        person_x1, person_y1, person_x2, person_y2 = person_box
+        
+        is_inside = (
+            pkg_x1 >= person_x1 and
+            pkg_y1 >= person_y1 and
+            pkg_x2 <= person_x2 and
+            pkg_y2 <= person_y2
+        )
+        
+        if is_inside:
+            # Still carrying - clear any separation tags
+            if "separated_from:" in pkg_info["tags"]:
+                try:
+                    conn.execute(
+                        "UPDATE scene_tracks SET tags=? WHERE id=?",
+                        ("", pkg_info["track_id"])
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
+            continue
+        
+        # Package is outside person bbox - check distance
+        pkg_center = _center(pkg_box)
+        person_center = _center(person_box)
+        distance = _dist(pkg_center, person_center)
+        
+        # Normalize by person width
+        person_width = person_box[2] - person_box[0]
+        norm_distance = distance / max(1.0, person_width)
+        
+        # Check separation tags
+        tags = pkg_info["tags"]
+        separation_duration = 0
+        
+        if tags and "separated_from:" in tags:
+            try:
+                parts = tags.split()
+                for part in parts:
+                    if part.startswith("separated_since:"):
+                        separated_since = int(part.split(":")[1])
+                        separation_duration = now_ts - separated_since
+                        break
+            except Exception:
+                pass
+        
+        # First time seeing separation - tag it and wait
+        expected_tag = f"separated_from:{carrier_visitor_id} separated_since:{now_ts}"
+        if separation_duration == 0:
+            try:
+                conn.execute(
+                    "UPDATE scene_tracks SET tags=? WHERE id=?",
+                    (expected_tag, pkg_info["track_id"])
+                )
+                conn.commit()
+            except Exception as e:
+                print(f"[DROPOFF] Warning: Failed to tag package separation: {e}")
+            continue
+        
+        # Check if separation time threshold met
+        if separation_duration < min_separation_time_s:
+            continue  # Not long enough yet
+        
+        # DROP-OFF DETECTED!
+        person_id = getattr(carrier_person, "object_id", None)
+        person_det_conf = getattr(carrier_person, "conf", 0.9)
+        pkg_det_conf = getattr(pkg, "conf", 0.9)
+        
+        # Confidence: distance factor * detector confs * time factor
+        distance_factor = max(0.0, 1.0 - (norm_distance / max_separation_distance))
+        time_factor = min(1.0, separation_duration / (min_separation_time_s * 2))
+        final_conf = distance_factor * person_det_conf * pkg_det_conf * time_factor
+        
+        if final_conf < min_confidence:
+            continue
+        
+        links.append(
+            VisitEntityLink(
+                relation=relation,
+                confidence=float(_clamp01(final_conf)),
+                subject_type="person",
+                subject_object_id=int(person_id),
+                subject_key=carrier_visitor_id,
+                subject_meta={
+                    "person_conf": float(person_det_conf),
+                    "person_age_s": now_ts - carrier_person_info["first_seen_ts"],
+                },
+                object_type="package",
+                object_object_id=int(pkg_id),
+                object_key=None,
+                object_meta={
+                    "package_conf": float(pkg_det_conf),
+                    "package_age_s": now_ts - pkg_info["first_seen_ts"],
+                    "separation_time_s": separation_duration,
+                    "norm_distance": float(norm_distance),
+                },
+                notes=f"package_dropped_after_{separation_duration}s_separation",
+            )
+        )
+    
     return links
 
 
