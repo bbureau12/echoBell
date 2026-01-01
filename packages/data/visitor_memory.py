@@ -279,12 +279,13 @@ def create_visitor_event(
     intent: str | None = None,
     intent_conf: float | None = None,
     evidence: dict[str, Any] | None = None,
+    camera_id: int | None = None,
 ) -> None:
     conn.execute(
         """
         INSERT OR REPLACE INTO visitor_events (
-            event_id, visitor_id, detected_ts, intent_inferred, intent_confidence, evidence_json
-        ) VALUES (?, ?, ?, ?, ?, ?)
+            event_id, visitor_id, detected_ts, intent_inferred, intent_confidence, evidence_json, camera_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event_id,
@@ -293,6 +294,7 @@ def create_visitor_event(
             intent,
             intent_conf,
             json.dumps(evidence, separators=(",", ":"), ensure_ascii=False) if evidence else None,
+            camera_id,
         ),
     )
     

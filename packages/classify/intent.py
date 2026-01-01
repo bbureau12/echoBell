@@ -306,20 +306,13 @@ def _score_signal_rules(conn: sqlite3.Connection, vision: VisionResult):
 
 
 
-def classify(
-    text: str, 
-    vision: VisionResult, 
-    db_path: str | None = None,
-    plate_service = None,
-) -> Classified:
+def classify(text: str, vision: VisionResult, db_path: str | None = None) -> Classified:
     """
     Combine TEXT rules + multimodal EVIDENCE rules into a final intent.
 
     - Text rules come from: intent_def / pattern_def / entity_def
     - Vision/OCR/future fashion/audio rules come from: signal_rule
       acting on `vision.evidence`.
-    - Plate history: If plate_service is provided, looks up past intents
-      for detected plates and adds them as evidence.
     """
     db_path = db_path or _default_db_path()
     t = (text or "").lower()
@@ -378,36 +371,6 @@ def classify(
         # 2) MULTIMODAL EVIDENCE: signal_rule over vision.evidence
         trace: List[str] = []
 
-        # 2a) Check for plate history
-        if plate_service is not None:
-            plate_texts = [
-                ev.value for ev in vision.evidence 
-                if ev.source == "ocr" and ev.feature == "plate_text"
-            ]
-            
-            for plate_text in plate_texts:
-                plate_history = plate_service.get_plate_intent_history(conn, plate_text, limit=10)
-                
-                for hist in plate_history[:3]:  # Top 3 past intents
-                    # Weight by frequency and past confidence
-                    # More occurrences = higher confidence, but cap at 0.95
-                    freq_weight = min(1.0, hist["count"] / 5)  # 5+ visits = full weight
-                    conf = min(0.95, hist["avg_conf"] * freq_weight)
-                    
-                    # Add as evidence for downstream processing
-                    vision.evidence.append(Evidence(
-                        "plate_history", 
-                        "past_intent", 
-                        hist["intent"], 
-                        conf,
-                        object_id=None
-                    ))
-                    
-                    # Also boost the score directly
-                    scores[hist["intent"]] += conf * 0.8  # 80% weight vs normal evidence
-                    trace.append(f"plate_history: {plate_text} → {hist['intent']} (n={hist['count']}, conf={conf:.2f})")
-
-        # 2b) Signal rules
         sig_scores, sig_urgencies, sig_trace, rule_matches = _score_signal_rules(conn, vision)
         trace.extend(sig_trace)
 

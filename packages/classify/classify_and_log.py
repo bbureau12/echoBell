@@ -187,6 +187,82 @@ def _update_scene_tracking(
         print(f"[SCENE] Added {len(scene_evidence)} scene tracking evidence entries")
 
 
+def _add_visitor_intent_history(
+    conn: sqlite3.Connection,
+    *,
+    vision: VisionResult,
+    now_ts: int,
+    intent_persistence_window_s: int = 3600,
+) -> None:
+    """
+    Add recent intent history for known visitors (cross-camera intent persistence).
+    
+    If this visitor_id was recently classified with an intent at ANY camera,
+    add it as evidence to help maintain intent consistency across cameras.
+    
+    Example: Fire fighter exits truck at camera 1 (classified as "authority_urgent"),
+    then walks to camera 2 (front door). This function adds evidence that they
+    were recently classified as authority, enabling consistent classification.
+    
+    Args:
+        intent_persistence_window_s: How long to carry forward intent (default 1 hour)
+    """
+    if not vision.objects:
+        return
+    
+    try:
+        from packages.common.types import Evidence
+        
+        for obj in vision.objects:
+            if obj.label.lower() != "person":
+                continue
+            
+            visitor_id = obj.props.get("visitor_id")
+            if not visitor_id:
+                continue
+            
+            # Query most recent intent for this visitor_id
+            row = conn.execute("""
+                SELECT intent_inferred, urgency, intent_confidence, detected_ts
+                FROM visitor_events
+                WHERE visitor_id = ?
+                  AND intent_inferred IS NOT NULL
+                ORDER BY detected_ts DESC
+                LIMIT 1
+            """, (visitor_id,)).fetchone()
+            
+            if not row:
+                continue
+            
+            intent, urgency, conf, detected_ts = row
+            age_s = now_ts - int(detected_ts)
+            
+            # Only carry forward if within persistence window (same visit)
+            if age_s > intent_persistence_window_s:
+                print(f"[INTENT_HISTORY] Visitor {visitor_id[:8]}... last seen {age_s}s ago (beyond {intent_persistence_window_s}s window)")
+                continue
+            
+            # Add historical intent as evidence
+            vision.evidence.append(
+                Evidence(
+                    source="visitor_history",
+                    key="recent_intent",
+                    value=str(intent),
+                    confidence=float(conf or 0.5) * 0.8,  # Slightly reduce confidence for historical data
+                    object_id=obj.object_id,
+                    metadata={
+                        "age_seconds": age_s,
+                        "urgency": int(urgency or 10),
+                    }
+                )
+            )
+            print(f"[INTENT_HISTORY] Added recent intent '{intent}' for visitor {visitor_id[:8]}... (age={age_s}s, conf={conf:.2f})")
+            
+    except Exception as e:
+        # Don't fail the whole request if intent history lookup fails
+        print(f"[INTENT_HISTORY] Warning: Intent history lookup failed: {e}")
+
+
 def _link_people_to_vehicles(
     conn: sqlite3.Connection,
     *,
@@ -300,55 +376,33 @@ def classify_and_log(
     """
     Classify intent and log visitor event with all associated data.
     
+    Flow:
+    1. Enrich vision.evidence with all available context (plates, scene, linkage, history)
+    2. Classify intent using enriched evidence
+    3. Create visitor event and persist all data
+    
     Handles:
-    - Intent classification from text and vision evidence
-    - Visitor event creation
-    - Plate sighting linkage
+    - Trusted plate detection and evidence generation
     - Scene tracking (vehicle/person enter/exit)
+    - Person-vehicle linkage
+    - Cross-camera intent persistence (visitor history)
+    - Intent classification from text and enriched vision evidence
+    - Visitor event creation
     - Snapshot saving
     - Intent locking when confidence is high
+    
+    Args:
+        retention: Retention settings including intent_persistence_window_s (default 3600s = 1 hour)
     """
     # Initialize defaults
     retention = retention or RetentionSettings()
     now_ts = int(now_ts or time.time())
     event_id = event_id or str(uuid.uuid4())
 
-    # Classify intent
-    classified = classify(
-        text=text, 
-        vision=vision, 
-        db_path=db_path,
-        plate_service=plate_service,
-    )
-
-    # Extract actor information
-    actor = _choose_actor_visitor_id(vision)
-    visitor_id, person_object_id, similarity, kind = None, None, None, None
-    if actor:
-        visitor_id, person_object_id, similarity, kind = actor
-
-    # Database operations
+    # PHASE 1: Enrich vision.evidence with contextual data
+    # This must happen BEFORE classification so the classifier sees complete evidence
     with sqlite3.connect(db_path) as conn:
-        # 1) Create visitor event
-        create_visitor_event(
-            conn,
-            event_id=event_id,
-            visitor_id=visitor_id,
-            detected_ts_iso=_iso_now(now_ts),
-            intent=classified.intent,
-            intent_conf=classified.conf,
-            evidence={
-                "snapshot_path": getattr(vision, "snapshot_path", None),
-                "actor_object_id": person_object_id,
-                "visitor_kind": kind,
-                "visitor_similarity": similarity,
-                "intent": classified.intent,
-                "intent_conf": classified.conf,
-                "trace": classified.trace,
-            },
-        )
-
-        # 2) Link plates to event and get HMACs for scene tracking
+        # 1a) Link plates to event - adds trusted_plate evidence to vision.evidence
         plate_hmac_by_object_id, trusted_plate_evidence = _link_plates_to_event(
             conn,
             plate_service=plate_service,
@@ -360,11 +414,11 @@ def classify_and_log(
             vision=vision,
         )
         
-        # Add trusted plate evidence to vision
         if trusted_plate_evidence:
             vision.evidence.extend(trusted_plate_evidence)
+            print(f"[ENRICH] Added {len(trusted_plate_evidence)} trusted plate evidence entries")
         
-        # 3) Update scene tracking (vehicles/people entering/exiting)
+        # 1b) Update scene tracking - adds scene.* evidence to vision.evidence
         _update_scene_tracking(
             conn,
             scene_tracker=scene_tracker,
@@ -375,7 +429,7 @@ def classify_and_log(
             event_id=event_id,
         )
 
-        # 3a) Link people to vehicles (first appearance only)
+        # 1c) Link people to vehicles - adds linkage evidence to vision.evidence
         if camera_id is not None:
             _link_people_to_vehicles(
                 conn,
@@ -385,8 +439,82 @@ def classify_and_log(
                 event_id=event_id,
                 first_appearance_window_s=3,  # 3 second window for "just arrived"
             )
+        
+        # 1d) Add visitor intent history - adds cross-camera intent persistence
+        _add_visitor_intent_history(
+            conn,
+            vision=vision,
+            now_ts=now_ts,
+            intent_persistence_window_s=retention.intent_persistence_window_s,
+        )
 
-        # 4) Save visitor snapshot if applicable
+    # PHASE 2: Classify intent with ENRICHED evidence
+    # Now the classifier sees: trusted plates, scene tracking, person-vehicle links, visitor history
+    
+    # 2a) Add scene context evidence (what other intents are currently active?)
+    if scene_tracker and camera_id is not None:
+        try:
+            from packages.scene.scene_context import get_active_scene_intents
+            active_intents = get_active_scene_intents(conn, camera_id, now_ts, grace_period_s=6)
+            
+            if active_intents:
+                from packages.common.types import Evidence
+                # Add evidence about concurrent intents
+                for active in active_intents:
+                    vision.evidence.append(
+                        Evidence(
+                            source="scene",
+                            key="concurrent_intent",
+                            value=active["intent"],
+                            confidence=1.0,
+                            metadata={
+                                "track_key": active["track_key"],
+                                "urgency": active["urgency"],
+                                "duration_seconds": now_ts - active["first_seen_ts"],
+                            }
+                        )
+                    )
+                print(f"[SCENE_CONTEXT] Found {len(active_intents)} concurrent intents: {[a['intent'] for a in active_intents]}")
+        except Exception as e:
+            print(f"[SCENE_CONTEXT] Warning: Failed to query active scene intents: {e}")
+    
+    classified = classify(
+        text=text, 
+        vision=vision, 
+        db_path=db_path,
+        plate_service=plate_service,
+    )
+    print(f"[CLASSIFY] Intent={classified.intent}, Conf={classified.conf:.2f}, Urgency={classified.urgency}")
+
+    # Extract actor information
+    actor = _choose_actor_visitor_id(vision)
+    visitor_id, person_object_id, similarity, kind = None, None, None, None
+    if actor:
+        visitor_id, person_object_id, similarity, kind = actor
+
+    # PHASE 3: Persist results to database
+    with sqlite3.connect(db_path) as conn:
+        # 3a) Create visitor event with classified intent
+        create_visitor_event(
+            conn,
+            event_id=event_id,
+            visitor_id=visitor_id,
+            detected_ts_iso=_iso_now(now_ts),
+            intent=classified.intent,
+            intent_conf=classified.conf,
+            camera_id=camera_id,
+            evidence={
+                "snapshot_path": getattr(vision, "snapshot_path", None),
+                "actor_object_id": person_object_id,
+                "visitor_kind": kind,
+                "visitor_similarity": similarity,
+                "intent": classified.intent,
+                "intent_conf": classified.conf,
+                "trace": classified.trace,
+            },
+        )
+
+        # 3b) Save visitor snapshot if applicable
         _save_visitor_snapshot(
             conn,
             snapshot_service=snapshot_service,
@@ -399,7 +527,7 @@ def classify_and_log(
             event_id=event_id,
         )
 
-        # 5) Lock intent if confidence is high enough
+        # 3c) Lock intent if confidence is high enough
         if classified.conf >= lock_conf_threshold:
             update_visitor_event_intent(
                 conn,

@@ -12,3 +12,9 @@ class RetentionSettings:
     # Minimum time gap between snapshots for the same visitor (in seconds)
     # Default: 3600 seconds = 1 hour
     gap_between_visits_seconds: int = 3600
+    
+    # How long to carry forward intent across cameras for the same visitor (in seconds)
+    # Used for cross-camera intent persistence (e.g., fire fighter at driveway → door)
+    # Default: 3600 seconds = 1 hour
+    intent_persistence_window_s: int = 3600
+

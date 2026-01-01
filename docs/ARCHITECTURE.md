@@ -1,8 +1,8 @@
 # EchoBell Architecture
 
-**Document Version**: 1.0  
-**Last Updated**: December 31, 2025  
-**Branch**: scene_awareness
+**Document Version**: 1.1  
+**Last Updated**: January 1, 2026  
+**Branch**: scene_awareness_persons
 
 ---
 
@@ -116,29 +116,49 @@ EchoBell is a privacy-focused, multimodal doorbell intelligence system that:
        ├─> Size validation (1-5% of vehicle area)
        └─> Confidence boosting (pattern + position + size)
 
-3. Classification
-   └─> classify()
+3. Evidence Enrichment (PHASE 1 in classify_and_log)
+   └─> BEFORE classification
+       ├─> _link_plates_to_event()
+       │   ├─> plate_service.upsert_plate_visit() - record visit
+       │   ├─> plate_service.is_plate_trusted() - check trusted status
+       │   ├─> Add trusted_plate evidence to vision.evidence
+       │   └─> Add trusted info to vehicle SceneObject.props
+       ├─> _update_scene_tracking()
+       │   ├─> SceneTracker.update() - track vehicles/people
+       │   ├─> Generate scene.* evidence (entered, exited, present, count)
+       │   └─> Add scene evidence to vision.evidence
+       └─> _link_people_to_vehicles()
+           ├─> Check first_appearance_window (3 seconds)
+           ├─> Link people to vehicles they arrived in
+           └─> Add person_linked.vehicle_plate evidence
+
+4. Classification (PHASE 2 in classify_and_log)
+   └─> classify() - with ENRICHED evidence
        ├─> Text pattern matching (regex, keywords, entities)
        ├─> Vision signal rules (vehicle, person, plate evidence)
+       ├─> Trusted plate evidence (plate_trust.trusted_plate)
+       ├─> Scene tracking evidence (scene.vehicle_entered, etc.)
+       ├─> Person-vehicle linkage (person_linked.vehicle_plate)
        ├─> Plate history lookup (past intents for this vehicle)
        ├─> Signal grouping (co-occurrence within spatial scope)
        └─> Intent selection (weighted score aggregation)
 
-4. Event Logging
-   └─> classify_and_log()
-       ├─> Create visitor_event (with or without visitor_id)
-       ├─> Link plate sightings (visitor_event_plate_sightings)
-       ├─> Update scene tracking (vehicle/person enter/exit)
+5. Event Persistence (PHASE 3 in classify_and_log)
+   └─> After classification
+       ├─> create_visitor_event() - with classified intent
        ├─> Save snapshots (if retention policy allows)
-       └─> Lock intent (if confidence >= threshold)
+       └─> update_visitor_event_intent() - lock if high confidence
 
-5. Scene Tracking
+6. Scene Tracking Details
    └─> SceneTracker.update()
        ├─> Match observations to existing tracks
-       │   ├─> Strong key matching (plate_hmac, visitor_id)
-       │   └─> IoU matching (bounding box overlap)
-       ├─> Create new tracks (for new vehicles/people)
-       ├─> Mark exits (after grace period without detection)
+       │   ├─> Strong key matching (plate_hmac, visitor_id) - PRIORITY
+       │   ├─> IoU matching (bounding box overlap) - FALLBACK
+       │   └─> Upgrade temp → plate_hmac when plate detected
+       ├─> Create new tracks
+       │   ├─> Use plate_hmac if available (stable identity)
+       │   └─> Use temp:UUID otherwise (ephemeral)
+       ├─> Mark exits (after 6s grace period without detection)
        └─> Generate evidence (entered, exited, still_present, count)
 ```
 
@@ -272,26 +292,46 @@ def classify(
 
 **Main Function**: `classify_and_log()`
 
-**Refactored Architecture** (clean separation):
+**Updated 3-Phase Architecture** (evidence enrichment → classification → persistence):
 
 ```python
 classify_and_log()
-├─> classify()                          # Pure classification
-├─> _link_plates_to_event()             # Plate persistence
-├─> _update_scene_tracking()            # Scene state updates
-├─> _save_visitor_snapshot()            # Snapshot management
-└─> update_visitor_event_intent()       # Intent locking
+├─> PHASE 1: Evidence Enrichment
+│   ├─> _link_plates_to_event()         # Adds trusted_plate evidence
+│   ├─> _update_scene_tracking()        # Adds scene.* evidence
+│   ├─> _link_people_to_vehicles()      # Adds linkage evidence
+│   └─> _add_visitor_intent_history()   # Adds cross-camera intent persistence
+├─> PHASE 2: Classification
+│   └─> classify()                      # With ENRICHED evidence
+└─> PHASE 3: Persistence
+    ├─> create_visitor_event()          # Event creation with camera_id
+    ├─> _save_visitor_snapshot()        # Snapshot management
+    └─> update_visitor_event_intent()   # Intent locking
 ```
+
+**Critical Design Decision**: Evidence enrichment happens BEFORE classification
+- Scene tracking adds `scene.vehicle_entered`, `scene.person_entered`
+- Trusted plates add `plate_trust.trusted_plate=<label>`
+- Person-vehicle linkage adds `person_linked.vehicle_plate=<hmac>`
+- Visitor history adds `visitor_history.recent_intent=<intent>` (cross-camera persistence)
+- Classifier sees complete evidence picture for accurate intent inference
 
 **Helper Functions**:
 - `_ensure_plate_sighting_schema()`: DB schema setup
-- `_link_plates_to_event()`: Process plate reads, return HMAC mapping
+- `_link_plates_to_event()`: Process plates, add trusted evidence, return HMAC mapping
 - `_update_scene_tracking()`: Scene tracker updates, evidence injection
+- `_link_people_to_vehicles()`: Person-vehicle association with first-appearance check
+- `_add_visitor_intent_history()`: Cross-camera intent persistence via visitor_id lookup
 - `_save_visitor_snapshot()`: Conditional snapshot saving
 
-**Key Insight**: Single `plate_service.upsert_plate_visit()` call per plate
-- No redundant DB operations
+**Key Insights**:
+- Single `plate_service.upsert_plate_visit()` call per plate (no redundant DB ops)
 - HMAC mapping reused for scene tracking
+- Trusted plate info added to BOTH vision.evidence AND vehicle SceneObject.props
+- Scene tracking uses plate_hmac as primary vehicle identity
+- Intent history enables cross-camera classification consistency
+- Classification happens AFTER all enrichment for maximum accuracy
+- Camera_id now tracked in visitor_events for journey analysis
 
 ### `packages/scene/`
 
@@ -366,23 +406,43 @@ CREATE TABLE scene_tracks (
 def upsert_plate_visit(conn, raw_plate_text, camera_id, seen_ts):
     """
     Insert or update plate visit.
-    Returns PlateVisitResult with plate_hmac.
+    Returns PlateRepeatResult with plate_hmac, is_repeat, visit_count.
     Privacy: stores HMAC, not raw text.
+    """
+
+def is_plate_trusted(conn, raw_plate_text):
+    """
+    Check if a plate is in the trusted_plates table.
+    Returns dict with {plate_hmac, label, enabled} or None.
+    Used to generate trusted_plate evidence for classification.
+    """
+
+def add_trusted_plate(conn, raw_plate_text, label, enabled=True, notes=None):
+    """
+    Add/update a trusted plate by raw text.
+    Stores only plate_hmac + label in trusted_plates table.
+    Returns plate_hmac or None if invalid.
     """
 
 def get_plate_intent_history(conn, raw_plate_text, limit=10):
     """
     Lookup past intents for a plate.
-    Returns list of {intent, count, avg_conf, last_seen_ts}.
+    Returns list of {intent, count, avg_conf}.
     Used to boost intent classification for known vehicles.
     """
 ```
 
 **Privacy Model** (see ADR-00002):
-- Raw plate text → SHA256 HMAC with secret salt
-- Only HMAC stored in database
+- Raw plate text → SHA256 HMAC with secret salt (via `plate_hmac_hex()`)
+- Only HMAC stored in database (both `plate_visitors` and `trusted_plates`)
 - Raw text never persisted
 - HMAC allows matching without exposing PII
+- Trusted plates identified by HMAC, label stored alongside
+
+**Database Tables**:
+- `plate_visitors`: All seen plates with visit counts
+- `trusted_plates`: Known vehicles (family, delivery services, etc.)
+- `visitor_event_plate_sightings`: Links plates to specific events
 
 #### `visitor_memory.py` - Event & Identity Tracking
 
@@ -567,9 +627,13 @@ CREATE TABLE visitor_events (
     intent_conf REAL,
     intent_locked INTEGER DEFAULT 0,  -- Boolean flag
     evidence_json TEXT,               -- JSON blob of evidence
-    FOREIGN KEY(visitor_id) REFERENCES visitors(visitor_id)
+    camera_id INTEGER,                -- Which camera detected this event
+    FOREIGN KEY(visitor_id) REFERENCES visitors(visitor_id),
+    FOREIGN KEY(camera_id) REFERENCES camera(id)
 );
 ```
+
+**Purpose**: Tracks visitor journey across cameras, enables cross-camera analysis.
 
 #### `plate_visitors`
 Plate visit history (privacy-safe).
@@ -666,7 +730,8 @@ Central configuration for all tunable parameters.
   
   "retention": {
     "save_visitor_snapshot": true,
-    "gap_between_visits_seconds": 3600
+    "gap_between_visits_seconds": 3600,
+    "intent_persistence_window_s": 3600  // Cross-camera intent persistence (1 hour)
   },
   
   "plate_modifiers": {
