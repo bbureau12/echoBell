@@ -208,6 +208,50 @@ class SceneTracker:
             (now_ts, track_id),
         )
 
+    def _reactivate_track(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        track_id: int,
+        now_ts: int,
+        box: Box,
+        raw_class: str | None,
+        color: str | None,
+        last_event_id: str | None,
+    ) -> None:
+        """Reactivate an inactive track (person/vehicle returned)."""
+        conn.execute(
+            """
+            UPDATE scene_tracks
+            SET active=1, last_seen_ts=?, last_box_json=?, 
+                raw_class=COALESCE(?, raw_class),
+                color=COALESCE(?, color), 
+                last_event_id=COALESCE(?, last_event_id)
+            WHERE id=?
+            """,
+            (now_ts, _box_to_json(box), raw_class, color, last_event_id, track_id),
+        )
+
+    def _find_inactive_track(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        camera_id: int,
+        track_type: str,
+        track_key: str,
+    ) -> int | None:
+        """Find an inactive track with the given key. Returns track_id or None."""
+        row = conn.execute(
+            """
+            SELECT id FROM scene_tracks
+            WHERE camera_id=? AND track_type=? AND track_key=? AND active=0
+            ORDER BY last_seen_ts DESC
+            LIMIT 1
+            """,
+            (camera_id, track_type, track_key),
+        ).fetchone()
+        return row[0] if row else None
+
     def update_tags(
         self,
         conn: sqlite3.Connection,
@@ -386,15 +430,72 @@ class SceneTracker:
 
                     # 2.5) Upgrade key if we now have a strong key (plate/visitor)
                     if strong_key and best.track_key.startswith("temp:"):
-                        # mark old temp track inactive and create new keyed track (simple v1)
-                        # (keeps UNIQUE constraint simple)
-                        print(f"[SceneTracker] Upgrading temp track {best.track_key[:20]} to {strong_kind}={strong_key[:20]}")
+                        # Check if there's an inactive track with this strong key
+                        existing_track_id = self._find_inactive_track(
+                            conn, camera_id=camera_id, track_type=track_type, track_key=strong_key
+                        )
+                        
+                        # Mark old temp track inactive
                         self._mark_exited(conn, track_id=best.id, now_ts=now_ts)
+                        
+                        if existing_track_id:
+                            # Reactivate the existing track (person/vehicle returned)
+                            print(f"[SceneTracker] Reactivating track {strong_kind}={strong_key[:20]}")
+                            self._reactivate_track(
+                                conn,
+                                track_id=existing_track_id,
+                                now_ts=now_ts,
+                                box=obs.box,
+                                raw_class=obs.raw_class,
+                                color=obs.color,
+                                last_event_id=event_id,
+                            )
+                            still_present += 1
+                        else:
+                            # Create new keyed track
+                            print(f"[SceneTracker] Upgrading temp track {best.track_key[:20]} to {strong_kind}={strong_key[:20]}")
+                            self._insert_track(
+                                conn,
+                                camera_id=camera_id,
+                                track_type=track_type,
+                                key_kind=strong_kind or "iou",
+                                track_key=strong_key,
+                                now_ts=now_ts,
+                                box=obs.box,
+                                raw_class=obs.raw_class,
+                                color=obs.color,
+                                last_event_id=event_id,
+                            )
+                            entered += 1
+                    continue
+
+                # 3) New track - use strong key if available, otherwise temp key
+                if strong_key:
+                    # Check if there's an inactive track with this strong key (person/vehicle returned)
+                    existing_track_id = self._find_inactive_track(
+                        conn, camera_id=camera_id, track_type=track_type, track_key=strong_key
+                    )
+                    
+                    if existing_track_id:
+                        # Reactivate the existing track
+                        print(f"[SceneTracker] Reactivating track {strong_kind}={strong_key[:20]}")
+                        self._reactivate_track(
+                            conn,
+                            track_id=existing_track_id,
+                            now_ts=now_ts,
+                            box=obs.box,
+                            raw_class=obs.raw_class,
+                            color=obs.color,
+                            last_event_id=event_id,
+                        )
+                        still_present += 1
+                    else:
+                        # New track with plate/visitor ID
                         self._insert_track(
                             conn,
                             camera_id=camera_id,
                             track_type=track_type,
-                            key_kind=strong_kind or "iou",
+                            key_kind=strong_kind or "strong",
                             track_key=strong_key,
                             now_ts=now_ts,
                             box=obs.box,
@@ -403,24 +504,6 @@ class SceneTracker:
                             last_event_id=event_id,
                         )
                         entered += 1
-                    continue
-
-                # 3) New track - use strong key if available, otherwise temp key
-                if strong_key:
-                    # New track with plate/visitor ID
-                    self._insert_track(
-                        conn,
-                        camera_id=camera_id,
-                        track_type=track_type,
-                        key_kind=strong_kind or "strong",
-                        track_key=strong_key,
-                        now_ts=now_ts,
-                        box=obs.box,
-                        raw_class=obs.raw_class,
-                        color=obs.color,
-                        last_event_id=event_id,
-                    )
-                    entered += 1
                 else:
                     # New track with temporary IoU-based key
                     temp_key = f"temp:{uuid.uuid4().hex}"
