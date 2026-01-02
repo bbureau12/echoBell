@@ -22,6 +22,99 @@ from packages.scene.scene_tracker import SceneTracker
 from packages.common.config_models import RetentionSettings
 
 
+def _add_trusted_person_from_image(
+    conn: sqlite3.Connection,
+    image_path: Path,
+    name: str,
+    label: str,
+    model_name: str = "buffalo_l",
+    min_score: float = 0.6,
+    min_px: int = 80,
+) -> int:
+    """
+    Add a trusted person by extracting face embeddings from an image.
+    
+    Returns the trusted_id of the created person.
+    """
+    import cv2
+    import numpy as np
+    from insightface.app import FaceAnalysis
+    
+    # Helper functions from trusted_cli.py
+    def l2_normalize(x: np.ndarray) -> np.ndarray:
+        n = float(np.linalg.norm(x))
+        return x if n == 0 else (x / n)
+    
+    # Create or get trusted person
+    cursor = conn.execute(
+        "SELECT trusted_id FROM trusted_person WHERE name = ?",
+        (name,),
+    )
+    row = cursor.fetchone()
+    
+    if row:
+        trusted_id = int(row[0])
+    else:
+        cursor = conn.execute(
+            """
+            INSERT INTO trusted_person (name, label, created_ts, active)
+            VALUES (?, ?, ?, 1)
+            """,
+            (name, label, int(time.time())),
+        )
+        trusted_id = int(cursor.lastrowid)
+    
+    # Load image and extract face
+    img = cv2.imread(str(image_path))
+    if img is None:
+        raise ValueError(f"Could not read image: {image_path}")
+    
+    # Initialize face analysis
+    app = FaceAnalysis(name=model_name)
+    app.prepare(ctx_id=-1, det_size=(640, 640))
+    
+    # Detect faces
+    faces = app.get(img) or []
+    good_faces = []
+    
+    for f in faces:
+        score = float(getattr(f, "det_score", 1.0))
+        x1, y1, x2, y2 = [int(v) for v in f.bbox]
+        w, h = (x2 - x1), (y2 - y1)
+        
+        if score >= min_score and w >= min_px and h >= min_px:
+            emb = l2_normalize(f.embedding.astype("float32"))
+            good_faces.append((emb, score))
+    
+    if len(good_faces) == 0:
+        raise ValueError(f"No good face found in image: {image_path}")
+    if len(good_faces) > 1:
+        raise ValueError(f"Multiple faces found in image: {image_path}")
+    
+    # Store the embedding
+    embedding, quality = good_faces[0]
+    embedding_blob = embedding.tobytes()
+    
+    conn.execute("""
+        INSERT INTO trusted_person_embedding 
+        (trusted_id, embedding_type, model_name, embedding_dim, embedding_blob, 
+         created_ts, quality_score, camera_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+    """, (
+        trusted_id,
+        "face",
+        model_name,
+        len(embedding),
+        embedding_blob,
+        int(time.time()),
+        quality,
+    ))
+    
+    print(f"  Added trusted person '{name}' (ID={trusted_id}) with {len(embedding)}-dim embedding from {image_path.name}")
+    
+    return trusted_id
+
+
 @pytest.fixture
 def test_db(tmp_path):
     """Create a temporary test database with full schema."""
@@ -147,125 +240,14 @@ def test_db(tmp_path):
         (group_id, rule_31_id),  # adult
     ])
     
-    # Insert a trusted visitor for the trusted_person_single test
-    # Copy trusted visitors and embeddings from live database if it exists
-    live_db_path = Path(__file__).parent.parent / "data" / "doorbell.db"
-    
-    if live_db_path.exists():
-        print(f"Copying trusted visitor data from live database: {live_db_path}")
-        live_conn = sqlite3.connect(str(live_db_path))
-        
-        try:
-            # Copy trusted_person table
-            # First check what columns exist in the live database
-            cursor = live_conn.execute("PRAGMA table_info(trusted_person)")
-            columns = {row[1] for row in cursor.fetchall()}
-            
-            # Build SELECT query based on available columns
-            select_cols = ["trusted_id", "name", "label", "created_ts"]
-            if "updated_ts" in columns:
-                select_cols.append("updated_ts")
-            if "active" in columns:
-                select_cols.append("active")
-            
-            query = f"SELECT {', '.join(select_cols)} FROM trusted_person"
-            if "active" in columns:
-                query += " WHERE active = 1"
-                
-            trusted_people = live_conn.execute(query).fetchall()
-            
-            if trusted_people:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS trusted_person (
-                        trusted_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        name TEXT NOT NULL UNIQUE,
-                        label TEXT,
-                        created_ts INTEGER NOT NULL,
-                        updated_ts INTEGER,
-                        active INTEGER DEFAULT 1
-                    )
-                """)
-                
-                # Prepare data with all columns (use None for missing ones)
-                insert_data = []
-                for row in trusted_people:
-                    data = list(row)
-                    # Pad with None if missing columns
-                    while len(data) < 6:
-                        data.append(None if len(data) == 4 else 1)  # updated_ts=None, active=1
-                    insert_data.append(tuple(data))
-                
-                conn.executemany("""
-                    INSERT OR REPLACE INTO trusted_person (trusted_id, name, label, created_ts, updated_ts, active)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, insert_data)
-                print(f"  Copied {len(trusted_people)} trusted persons")
-            
-            # Copy trusted_person_embedding
-            # First, let's see what's in the live database
-            embedding_types = live_conn.execute("""
-                SELECT DISTINCT embedding_type, model_name, COUNT(*) 
-                FROM trusted_person_embedding 
-                GROUP BY embedding_type, model_name
-            """).fetchall()
-            
-            print(f"  Embedding types in live DB:")
-            for et, mn, count in embedding_types:
-                print(f"    {et}/{mn}: {count} embeddings")
-            
-            embeddings = live_conn.execute("""
-                SELECT embedding_id, trusted_id, embedding_type, model_name, embedding_dim, 
-                       embedding_blob, created_ts, quality_score, camera_id
-                FROM trusted_person_embedding
-            """).fetchall()
-            
-            print(f"  Found {len(embeddings)} total embeddings in live database")
-            
-            if embeddings:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS trusted_person_embedding (
-                        embedding_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        trusted_id INTEGER NOT NULL,
-                        embedding_type TEXT NOT NULL,
-                        model_name TEXT NOT NULL,
-                        embedding_dim INTEGER NOT NULL,
-                        embedding_blob BLOB NOT NULL,
-                        created_ts INTEGER NOT NULL,
-                        quality_score REAL DEFAULT 1.0,
-                        camera_id INTEGER
-                    )
-                """)
-                
-                conn.executemany("""
-                    INSERT OR REPLACE INTO trusted_person_embedding 
-                    (embedding_id, trusted_id, embedding_type, model_name, embedding_dim, embedding_blob, 
-                     created_ts, quality_score, camera_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, embeddings)
-                print(f"  Copied {len(embeddings)} embeddings for trusted persons")
-                
-        except sqlite3.OperationalError as e:
-            print(f"  Warning: Could not copy trusted visitor data: {e}")
-        finally:
-            live_conn.close()
-    else:
-        print(f"  Live database not found at {live_db_path}, creating minimal test data")
-        # Create minimal trusted person for testing
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS trusted_person (
-                trusted_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                label TEXT,
-                created_ts INTEGER NOT NULL,
-                updated_ts INTEGER,
-                active INTEGER DEFAULT 1
-            )
-        """)
-        
-        conn.execute("""
-            INSERT OR IGNORE INTO trusted_person (name, label, created_ts, active)
-            VALUES ('Test Person', 'test', ?, 1)
-        """, (int(time.time()),))
+    # Add trusted person from test image for the trusted_person_single test
+    # This uses the same image as the test case so it's self-contained
+    _add_trusted_person_from_image(
+        conn=conn,
+        image_path=Path(__file__).parent / "fixtures" / "trusted" / "20251227_174156.jpg",
+        name="test_trusted_person",
+        label="test_trusted_person",
+    )
     
     conn.commit()
     conn.close()
