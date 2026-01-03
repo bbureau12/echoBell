@@ -179,12 +179,18 @@ def test_db(tmp_path):
     
     # Insert test signal rules for sheriff/authority test
     conn.executemany("""
-        INSERT INTO signal_rule (source, feature, operator, value, intent_name, weight, min_conf, urgency, enabled)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+        INSERT INTO signal_rule (source, feature, operator, value, intent_name, weight, min_conf, urgency, scope_any_of, enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
     """, [
-        ('ocr', 'token', 'contains', 'sheri', 'authority_urgent', 0.0, 0.15, 10),  # Rule 29
-        ('vision', 'class', 'equals', 'tie', 'authority_urgent', 0.0, 0.75, 10),   # Rule 30
-        ('age', 'age_group', 'equals', 'adult', 'authority_urgent', 0.0, 0.80, 10), # Rule 31
+        ('ocr', 'token', 'contains', 'sheri', 'authority_urgent', 0.0, 0.15, 10, ''),  # Rule 29
+        ('vision', 'class', 'equals', 'tie', 'authority_urgent', 0.0, 0.75, 10, ''),   # Rule 30
+        ('age', 'age_group', 'equals', 'adult', 'authority_urgent', 0.0, 0.80, 10, ''), # Rule 31
+        # Delivery rules (package_drop intent)
+        ('ocr', 'token', 'contains', 'usps', 'package_drop', 0.9, 0.4, 10, 'vehicle'),
+        ('ocr', 'token', 'contains', 'ups', 'package_drop', 0.9, 0.4, 10, 'vehicle'),
+        ('ocr', 'token', 'contains', 'amazon', 'package_drop', 0.9, 0.4, 10, 'vehicle'),
+        ('ocr', 'token', 'contains', 'prime', 'package_drop', 0.9, 0.4, 10, 'vehicle'),
+        ('ocr', 'token', 'contains', 'fedex', 'package_drop', 0.9, 0.4, 10, 'vehicle'),
     ])
     
     # Get the rule IDs we just created
@@ -395,6 +401,36 @@ VISION_TEST_CASES = [
         check_signal_rules=[
             "authority_urgent",  # Should match signal rules 29, 30, 31 and group sheriff deputy
         ]
+    ),
+    VisionTestCase(
+        name="delivery_usps",
+        image_path=TEST_CASES_DIR / "delivery" / "usps.jpg",
+        expected_evidence=[
+            {"source": "vision", "feature": "class", "value": "vehicle", "min_conf": 0.40, "object_id": 0},
+        ],
+        expected_intent="package_drop",
+        expected_intent_conf=0.40,  # USPS OCR rule gives 0.9 weight
+        expected_urgency=10,
+    ),
+    VisionTestCase(
+        name="delivery_ups",
+        image_path=TEST_CASES_DIR / "delivery" / "ups.jpg",
+        expected_evidence=[
+            {"source": "vision", "feature": "class", "value": "vehicle", "min_conf": 0.40, "object_id": 0},
+        ],
+        expected_intent="package_drop",
+        expected_intent_conf=0.40,
+        expected_urgency=10,
+    ),
+    VisionTestCase(
+        name="delivery_amazon",
+        image_path=TEST_CASES_DIR / "delivery" / "amazon.jpg",
+        expected_evidence=[
+            {"source": "vision", "feature": "class", "value": "vehicle", "min_conf": 0.40, "object_id": 0},
+        ],
+        expected_intent="package_drop",
+        expected_intent_conf=0.40,
+        expected_urgency=10,
     ),
     # Add more test cases here as needed
 ]

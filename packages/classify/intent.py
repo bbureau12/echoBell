@@ -155,6 +155,10 @@ def _score_signal_groups(conn, vision: VisionResult, rule_matches: list[RuleMatc
                 by_rule_and_bind[(rid, bind_id)].append(m)
                 candidate_binds.add(bind_id)
 
+        # If bind_scope is specific (not 'none') and we have no binds, skip this group
+        if not candidate_binds and str(bind_scope).lower() not in ('none', '*', ''):
+            continue
+
         for bind_id in candidate_binds or {None}:
             # required check
             ok = True
