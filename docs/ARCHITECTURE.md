@@ -1,8 +1,8 @@
 # EchoBell Architecture
 
-**Document Version**: 1.1  
-**Last Updated**: January 1, 2026  
-**Branch**: scene_awareness_persons
+**Document Version**: 1.2  
+**Last Updated**: January 3, 2026  
+**Branch**: intent_tracking
 
 ---
 
@@ -393,9 +393,38 @@ CREATE TABLE scene_tracks (
     color TEXT,
     last_event_id TEXT,
     tags TEXT,              -- Space-separated keywords
-    UNIQUE(camera_id, track_key)
+    UNIQUE(camera_id, track_type, track_key)
 );
 ```
+
+**Cross-Camera Tracking** (ADR-0010):
+
+Scene tracking is inherently per-camera (enforced by UNIQUE constraint), but 
+EchoBell provides cross-camera person tracking via `visitor_id`:
+
+```python
+# Check if person is active anywhere
+is_active = tracker.is_person_active_anywhere(visitor_id="vis_abc123", now_ts=ts)
+
+# Get all cameras currently seeing this person
+cameras = tracker.get_person_cameras(visitor_id="vis_abc123", now_ts=ts)
+# Returns: [1, 2]  # Person visible on camera 1 and 2
+
+# Get all active visitors across all cameras
+visitors = tracker.get_active_visitors_all_cameras(now_ts=ts)
+# Returns: {"vis_abc123": [1, 2], "vis_def456": [3]}
+```
+
+**Use Cases**:
+- **Global presence detection**: "Is family member home?" (any camera)
+- **Camera handoff**: Detect person moving between camera views
+- **Policy decisions**: Scene-wide notification suppression if known person present
+- **Journey tracking**: Monitor visitor path through multi-camera property
+
+**Grace Period Handling**:
+- Cross-camera queries respect the same `grace_period_s` (default 6 seconds)
+- Person moving from camera 1 → camera 2 during handoff shows on both cameras
+- Prevents false "person exited property" during brief camera transitions
 
 ### `packages/data/`
 

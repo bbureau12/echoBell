@@ -1,31 +1,84 @@
-# Vision Regression Tests
+# EchoBell Tests
 
-This directory contains regression tests for the echoBell vision system.
+This directory contains the test suite for the EchoBell vision and tracking system.
 
-## Structure
+## Test Files
 
-```
-tests/
-├── fixtures/           # Test images organized by scenario
-│   ├── trusted/       # Trusted person images
-│   ├── sheriff/       # Law enforcement images
-│   ├── delivery/      # Delivery person images
-│   ├── resident/      # Known resident images
-│   └── unknown/       # Unknown visitor images
-├── test_vision_regression.py  # Main regression test suite
-└── README.md          # This file
-```
+### Vision Regression Tests (`test_vision_regression.py`)
+Image-based regression tests for the vision system. Uses real photos to verify
+detection, classification, and evidence generation.
+
+**Runs:** 6 tests  
+**Coverage:** Person detection, vehicle detection, plate reading, scene evidence
+
+See [Vision Regression Tests](#vision-regression-tests-1) section below for details.
+
+### Scene Linkage Tests (`test_scene_linkage.py`)
+Tests entity association logic (person-to-vehicle, person-to-package) using
+synthetic bounding box data. No photos required.
+
+**Runs:** 41 tests  
+**Coverage:** Geometry helpers, spatial proximity, temporal constraints, confidence
+scoring, linkage persistence, package handling, edge cases
+
+**Key test classes:**
+- `TestGeometryHelpers` (10 tests) - IoU, box relationships, distance calculations
+- `TestPersonToVehicleLinkage` (8 tests) - Spatial proximity-based linkage
+- `TestTemporalConstraints` (3 tests) - Time-based linkage rules
+- `TestLinkageConfidenceScoring` (2 tests) - Confidence calculation
+- `TestLinkagePersistence` (3 tests) - State tracking across frames
+- `TestLinkageEvidence` (2 tests) - Evidence generation
+- `TestEdgeCases` (5 tests) - Boundary conditions
+- `TestPackageToPersonLinkage` (8 tests) - Package carrying detection
+
+### Plate Service Tests (`test_plate_service.py`)
+Tests license plate detection, HMAC privacy, trusted plate matching, and visit tracking.
+
+**Runs:** 27 tests  
+**Coverage:** Plate detection, hashing, trust labels, visit persistence
+
+### Cross-Camera Tracking Tests (`test_cross_camera_tracking.py`)
+Tests cross-camera person tracking via visitor_id. Verifies global presence
+detection, camera handoffs, and multi-visitor scenarios.
+
+**Runs:** 16 tests  
+**Coverage:** Single camera baseline, cross-camera tracking, multi-visitor scenes,
+grace period behavior, edge cases
+
+**Key test classes:**
+- `TestSingleCameraPersonTracking` (2 tests) - Per-camera baseline
+- `TestCrossCameraPersonTracking` (5 tests) - Camera handoff, global presence
+- `TestMultipleVisitorsMultipleCameras` (3 tests) - Multi-person scenes
+- `TestGracePeriodAcrossCameras` (2 tests) - Temporal window behavior
+- `TestEdgeCases` (4 tests) - No visitor_id, expired tracks, etc.
 
 ## Running Tests
 
-### Run all tests
-```bash
-pytest tests/
+### Run all tests (90 total)
+```powershell
+$env:PYTHONPATH="d:\Projects\echoBell\echoBell"
+.\.venv-vision\Scripts\python.exe -m pytest tests/ -v
+```
+
+### Run specific test file
+```powershell
+# Scene linkage only (41 tests)
+pytest tests/test_scene_linkage.py -v
+
+# Cross-camera tracking only (16 tests)
+pytest tests/test_cross_camera_tracking.py -v
+
+# Plate service only (27 tests)
+pytest tests/test_plate_service.py -v
+
+# Vision regression only (6 tests)
+pytest tests/test_vision_regression.py -v
 ```
 
 ### Run specific test
 ```bash
-pytest tests/test_vision_regression.py::test_vision_regression[trusted_person_single]
+pytest tests/test_vision_regression.py::test_vision_regression[trusted_person_single] -v
+pytest tests/test_cross_camera_tracking.py::TestCrossCameraPersonTracking::test_person_moves_between_cameras -v
 ```
 
 ### Run with verbose output
@@ -33,10 +86,26 @@ pytest tests/test_vision_regression.py::test_vision_regression[trusted_person_si
 pytest tests/ -v -s
 ```
 
-### Run only regression tests
-```bash
-pytest tests/ -m regression
+## Structure
+
 ```
+tests/
+├── fixtures/                       # Test images for vision regression
+│   ├── trusted/                   # Trusted person images
+│   ├── sheriff/                   # Law enforcement images
+│   ├── delivery/                  # Delivery person images
+│   ├── resident/                  # Known resident images
+│   └── unknown/                   # Unknown visitor images
+├── test_vision_regression.py      # Image-based vision tests (6 tests)
+├── test_scene_linkage.py          # Entity association tests (41 tests)
+├── test_plate_service.py          # Plate detection tests (27 tests)
+├── test_cross_camera_tracking.py  # Cross-camera tracking tests (16 tests)
+└── README.md                      # This file
+```
+
+---
+
+## Vision Regression Tests
 
 ## Adding New Test Cases
 

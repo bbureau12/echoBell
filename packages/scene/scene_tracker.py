@@ -278,6 +278,140 @@ class SceneTracker:
             (tags, track_id),
         )
 
+    def is_person_active_anywhere(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        visitor_id: str,
+        now_ts: int | None = None,
+    ) -> bool:
+        """
+        Check if a person (by visitor_id) is currently active on ANY camera.
+        
+        This enables cross-camera person tracking - detecting when someone is
+        present in the scene regardless of which camera sees them.
+        
+        Args:
+            conn: Database connection
+            visitor_id: The visitor_id to check
+            now_ts: Current timestamp (defaults to time.time())
+            
+        Returns:
+            True if person is active on any camera (within grace period)
+        """
+        if now_ts is None:
+            import time
+            now_ts = int(time.time())
+        
+        cutoff = now_ts - self.grace_period_s
+        
+        row = conn.execute(
+            """
+            SELECT COUNT(*) FROM scene_tracks
+            WHERE track_type='person' 
+              AND track_key=? 
+              AND active=1 
+              AND last_seen_ts >= ?
+            """,
+            (visitor_id, cutoff),
+        ).fetchone()
+        
+        return (row[0] if row else 0) > 0
+
+    def get_person_cameras(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        visitor_id: str,
+        now_ts: int | None = None,
+    ) -> list[int]:
+        """
+        Get all camera IDs where a person is currently active.
+        
+        Useful for tracking which cameras can see a person, detecting
+        camera handoffs, and multi-camera coverage analysis.
+        
+        Args:
+            conn: Database connection
+            visitor_id: The visitor_id to check
+            now_ts: Current timestamp (defaults to time.time())
+            
+        Returns:
+            List of camera_ids where person is currently active
+        """
+        if now_ts is None:
+            import time
+            now_ts = int(time.time())
+        
+        cutoff = now_ts - self.grace_period_s
+        
+        rows = conn.execute(
+            """
+            SELECT DISTINCT camera_id 
+            FROM scene_tracks
+            WHERE track_type='person' 
+              AND track_key=? 
+              AND active=1 
+              AND last_seen_ts >= ?
+            ORDER BY camera_id
+            """,
+            (visitor_id, cutoff),
+        ).fetchall()
+        
+        return [row[0] for row in rows]
+
+    def get_active_visitors_all_cameras(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        now_ts: int | None = None,
+    ) -> dict[str, list[int]]:
+        """
+        Get all active visitors across all cameras.
+        
+        Returns a mapping of visitor_id -> [camera_ids] showing which
+        cameras can currently see each person.
+        
+        Args:
+            conn: Database connection
+            now_ts: Current timestamp (defaults to time.time())
+            
+        Returns:
+            Dict mapping visitor_id to list of camera_ids
+            
+        Example:
+            {
+                "visitor_001": [1, 2],  # Seen on cameras 1 and 2
+                "visitor_002": [3],     # Only on camera 3
+            }
+        """
+        if now_ts is None:
+            import time
+            now_ts = int(time.time())
+        
+        cutoff = now_ts - self.grace_period_s
+        
+        rows = conn.execute(
+            """
+            SELECT track_key, camera_id, MAX(last_seen_ts) as most_recent
+            FROM scene_tracks
+            WHERE track_type='person' 
+              AND active=1 
+              AND last_seen_ts >= ?
+            GROUP BY track_key, camera_id
+            ORDER BY track_key, camera_id
+            """,
+            (cutoff,),
+        ).fetchall()
+        
+        result: dict[str, list[int]] = {}
+        for visitor_id, camera_id, _ in rows:
+            if visitor_id not in result:
+                result[visitor_id] = []
+            result[visitor_id].append(camera_id)
+        
+        return result
+
     def get_currently_present(
         self,
         conn: sqlite3.Connection,
