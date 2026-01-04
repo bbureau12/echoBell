@@ -55,7 +55,7 @@ no built-in way to query "is visitor X active on ANY camera?"
 
 ## Decision
 
-Add three new cross-camera query methods to `SceneTracker` that aggregate 
+Add five new cross-camera query methods to `SceneTracker` that aggregate 
 person tracking across all cameras using `visitor_id` as the key:
 
 ### 1. `is_person_active_anywhere(visitor_id, now_ts)`
@@ -129,6 +129,73 @@ ORDER BY track_key, camera_id
 ```
 
 **Use case**: Scene-wide presence overview, multi-visitor tracking
+
+### 4. `get_visitor_presence_duration(visitor_id, now_ts)`
+
+Get continuous presence duration (in seconds) for a specific visitor:
+
+```python
+duration = tracker.get_visitor_presence_duration(
+    visitor_id="vis_abc123",
+    now_ts=time.time()
+)
+# Returns: 420 (7 minutes) if person has been on property for 7 minutes
+# Returns: 0 if person not currently active
+```
+
+**SQL Implementation**:
+```sql
+SELECT MIN(first_seen_ts) as session_start
+FROM scene_tracks
+WHERE track_type = 'person'
+  AND track_key = ?  -- visitor_id
+  AND active = 1
+  AND last_seen_ts >= ?  -- now_ts - grace_period_s
+```
+
+**Use case**: Loitering detection, visit duration tracking
+
+**How it works**:
+- Tracks time since visitor first appeared in current "visit session"
+- Session persists as visitor moves between cameras
+- Session ends when not seen on ANY camera for > grace_period_s
+- New appearance after session ends starts fresh duration count
+
+**Example timeline**:
+```
+10:00:00 - Person appears on camera 1 (session starts)
+10:02:00 - Person moves to camera 2 (same session continues)
+10:07:00 - Query returns 420 seconds (7 minutes total)
+
+[Person leaves all cameras for > grace_period]
+
+Day 2, 14:00 - Person returns (new session starts)
+Day 2, 14:05 - Query returns 300 seconds (5 minutes, not days)
+```
+
+### 5. `get_all_visitor_presence_durations(now_ts)`
+
+Get presence duration for all active visitors:
+
+```python
+durations = tracker.get_all_visitor_presence_durations(now_ts=time.time())
+# Returns: {
+#     "vis_abc123": 420,  # 7 minutes
+#     "vis_def456": 180,  # 3 minutes
+# }
+```
+
+**SQL Implementation**:
+```sql
+SELECT track_key, MIN(first_seen_ts) as session_start
+FROM scene_tracks
+WHERE track_type = 'person'
+  AND active = 1
+  AND last_seen_ts >= ?  -- now_ts - grace_period_s
+GROUP BY track_key
+```
+
+**Use case**: Property-wide presence analytics, loitering alerts
 
 ## Implementation Details
 
@@ -224,13 +291,14 @@ Only people with `visitor_id` (successful ReID match) support cross-camera queri
 
 ## Testing Strategy
 
-Created `tests/test_cross_camera_tracking.py` with 16 tests covering:
+Created `tests/test_cross_camera_tracking.py` with 22 tests covering:
 
-1. **Single camera tracking** (baseline)
-2. **Cross-camera person tracking** (camera handoff scenarios)
-3. **Multiple visitors, multiple cameras** (scene-wide aggregation)
-4. **Grace period behavior** (temporal edge cases)
-5. **Edge cases** (no visitor_id, expired tracks, single visitor multi-camera)
+1. **Single camera tracking** (2 tests) - baseline
+2. **Cross-camera person tracking** (5 tests) - camera handoff scenarios
+3. **Multiple visitors, multiple cameras** (3 tests) - scene-wide aggregation
+4. **Grace period behavior** (2 tests) - temporal edge cases
+5. **Edge cases** (4 tests) - no visitor_id, expired tracks, special characters
+6. **Presence duration** (6 tests) - continuous session tracking, resets, cross-camera
 
 All tests use synthetic data (bounding boxes, visitor IDs, timestamps) - no 
 camera hardware or face images required.
@@ -348,5 +416,5 @@ def is_person_active_anywhere(visitor_id):
 - ADR-0006: Scene awareness entity association (person-vehicle linkage)
 - ADR-0005: Scene awareness temporal tracking (SceneTracker design)
 - `packages/scene/scene_tracker.py`: Implementation
-- `tests/test_cross_camera_tracking.py`: Test suite (16 tests)
+- `tests/test_cross_camera_tracking.py`: Test suite (22 tests)
 - `examples/cross_camera_tracking_usage.py`: Usage examples

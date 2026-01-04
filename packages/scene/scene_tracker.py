@@ -219,17 +219,20 @@ class SceneTracker:
         color: str | None,
         last_event_id: str | None,
     ) -> None:
-        """Reactivate an inactive track (person/vehicle returned)."""
+        """Reactivate an inactive track (person/vehicle returned after gap > grace period).
+        
+        Resets first_seen_ts to mark the start of a new continuous presence session.
+        """
         conn.execute(
             """
             UPDATE scene_tracks
-            SET active=1, last_seen_ts=?, last_box_json=?, 
+            SET active=1, first_seen_ts=?, last_seen_ts=?, last_box_json=?, 
                 raw_class=COALESCE(?, raw_class),
                 color=COALESCE(?, color), 
                 last_event_id=COALESCE(?, last_event_id)
             WHERE id=?
             """,
-            (now_ts, _box_to_json(box), raw_class, color, last_event_id, track_id),
+            (now_ts, now_ts, _box_to_json(box), raw_class, color, last_event_id, track_id),
         )
 
     def _find_inactive_track(
@@ -409,6 +412,152 @@ class SceneTracker:
             if visitor_id not in result:
                 result[visitor_id] = []
             result[visitor_id].append(camera_id)
+        
+        return result
+
+    def get_visitor_presence_duration(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        visitor_id: str,
+        now_ts: int | None = None,
+    ) -> int:
+        """
+        Get continuous presence duration (in seconds) for a visitor across all cameras.
+        
+        Returns the time since the visitor first appeared in their current
+        "visit session". A session is continuous as long as the person is
+        visible on at least one camera within the grace period.
+        
+        Example timeline:
+            - 10:00:00 - Person appears on camera 1 (first_seen_ts)
+            - 10:02:00 - Person moves to camera 2 (still same session)
+            - 10:07:00 - Person still on camera 2
+            - Query at 10:07:00 returns 420 seconds (7 minutes)
+            
+        If person left all cameras for > grace_period_s and returned:
+            - Day 1, 10:00 - Person on camera 1 for 1 minute, then leaves
+            - Day 2, 14:00 - Person returns on camera 1
+            - Query at Day 2, 14:05 returns 300 seconds (5 minutes, not 1 day+)
+        
+        Args:
+            conn: Database connection
+            visitor_id: The visitor_id to check
+            now_ts: Current timestamp (defaults to time.time())
+            
+        Returns:
+            Duration in seconds, or 0 if person not currently active
+        """
+        if now_ts is None:
+            import time
+            now_ts = int(time.time())
+        
+        cutoff = now_ts - self.grace_period_s
+        
+        # First check if person is currently active anywhere
+        is_active = conn.execute(
+            """
+            SELECT 1 FROM scene_tracks
+            WHERE track_type='person' 
+              AND track_key=? 
+              AND active=1 
+              AND last_seen_ts >= ?
+            LIMIT 1
+            """,
+            (visitor_id, cutoff),
+        ).fetchone()
+        
+        if not is_active:
+            return 0
+        
+        # Person is active - find the session start by walking backwards through tracks
+        # Get all tracks for this person, ordered by first_seen descending
+        rows = conn.execute(
+            """
+            SELECT first_seen_ts, last_seen_ts
+            FROM scene_tracks
+            WHERE track_type='person' AND track_key=?
+            ORDER BY first_seen_ts DESC
+            """,
+            (visitor_id,),
+        ).fetchall()
+        
+        if not rows:
+            return 0
+        
+        # Start from most recent track and work backwards
+        # Track is part of session if it started before previous track ended + grace
+        session_start = rows[0][0]  # Start with most recent first_seen
+        
+        for i in range(len(rows)):
+            current_first = rows[i][0]
+            current_last = rows[i][1]
+            
+            # Check if this track connects to the next older track
+            if i + 1 < len(rows):
+                next_first = rows[i + 1][0]
+                next_last = rows[i + 1][1]
+                
+                # Gap between tracks (when did previous track end vs when this one started)
+                gap = current_first - next_last
+                
+                if gap <= self.grace_period_s:
+                    # Tracks are connected - extend session start
+                    session_start = next_first
+                else:
+                    # Gap too large - this is a different session
+                    break
+        
+        return now_ts - session_start
+
+    def get_all_visitor_presence_durations(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        now_ts: int | None = None,
+    ) -> dict[str, int]:
+        """
+        Get continuous presence duration for all active visitors.
+        
+        Returns a mapping of visitor_id -> duration_seconds for all
+        visitors currently active on any camera.
+        
+        Args:
+            conn: Database connection
+            now_ts: Current timestamp (defaults to time.time())
+            
+        Returns:
+            Dict mapping visitor_id to duration in seconds
+            
+        Example:
+            {
+                "visitor_001": 420,  # 7 minutes on property
+                "visitor_002": 180,  # 3 minutes on property
+            }
+        """
+        if now_ts is None:
+            import time
+            now_ts = int(time.time())
+        
+        cutoff = now_ts - self.grace_period_s
+        
+        # Get all currently active visitors
+        active_visitors = conn.execute(
+            """
+            SELECT DISTINCT track_key
+            FROM scene_tracks
+            WHERE track_type='person' 
+              AND active=1 
+              AND last_seen_ts >= ?
+            """,
+            (cutoff,),
+        ).fetchall()
+        
+        result: dict[str, int] = {}
+        for (visitor_id,) in active_visitors:
+            duration = self.get_visitor_presence_duration(conn, visitor_id=visitor_id, now_ts=now_ts)
+            if duration > 0:
+                result[visitor_id] = duration
         
         return result
 

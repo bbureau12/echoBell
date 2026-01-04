@@ -39,11 +39,11 @@ Tests license plate detection, HMAC privacy, trusted plate matching, and visit t
 
 ### Cross-Camera Tracking Tests (`test_cross_camera_tracking.py`)
 Tests cross-camera person tracking via visitor_id. Verifies global presence
-detection, camera handoffs, and multi-visitor scenarios.
+detection, camera handoffs, multi-visitor scenarios, and presence duration tracking.
 
-**Runs:** 16 tests  
+**Runs:** 22 tests  
 **Coverage:** Single camera baseline, cross-camera tracking, multi-visitor scenes,
-grace period behavior, edge cases
+grace period behavior, edge cases, continuous presence duration
 
 **Key test classes:**
 - `TestSingleCameraPersonTracking` (2 tests) - Per-camera baseline
@@ -51,10 +51,11 @@ grace period behavior, edge cases
 - `TestMultipleVisitorsMultipleCameras` (3 tests) - Multi-person scenes
 - `TestGracePeriodAcrossCameras` (2 tests) - Temporal window behavior
 - `TestEdgeCases` (4 tests) - No visitor_id, expired tracks, etc.
+- `TestVisitorPresenceDuration` (6 tests) - Continuous session tracking, duration resets
 
 ## Running Tests
 
-### Run all tests (90 total)
+### Run all tests (96 total)
 ```powershell
 $env:PYTHONPATH="d:\Projects\echoBell\echoBell"
 .\.venv-vision\Scripts\python.exe -m pytest tests/ -v
@@ -65,7 +66,7 @@ $env:PYTHONPATH="d:\Projects\echoBell\echoBell"
 # Scene linkage only (41 tests)
 pytest tests/test_scene_linkage.py -v
 
-# Cross-camera tracking only (16 tests)
+# Cross-camera tracking only (22 tests)
 pytest tests/test_cross_camera_tracking.py -v
 
 # Plate service only (27 tests)
