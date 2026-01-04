@@ -13,6 +13,7 @@ from packages.policy.loader import load_policies
 from packages.policy.apply import choose_action
 from packages.tts.piper import speak
 from packages.scene.scene_tracker import SceneTracker
+from packages.common.config_models import RetentionSettings
 from storage.store import log_event
 
 # Get absolute paths for data files
@@ -21,10 +22,13 @@ DB = os.path.join(PROJECT_ROOT, "data", "doorbell.db")
 RTSP = os.path.join(PROJECT_ROOT, "data", "sherriff.jpg")
 MODE = "WORKING"  # later: read from DB
 
+# Initialize retention settings
+retention = RetentionSettings()
+
 # Initialize scene tracker for temporal awareness
 scene_tracker = SceneTracker(
     iou_match_threshold=0.30,
-    grace_period_s=6
+    grace_period_s=retention.scene_tracking_grace_period_s
 )
 
 def handle_ring():

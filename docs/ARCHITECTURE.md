@@ -769,7 +769,8 @@ Central configuration for all tunable parameters.
   "retention": {
     "save_visitor_snapshot": true,
     "gap_between_visits_seconds": 3600,
-    "intent_persistence_window_s": 3600  // Cross-camera intent persistence (1 hour)
+    "intent_persistence_window_s": 3600,  // Cross-camera intent persistence (1 hour)
+    "scene_tracking_grace_period_s": 6     // Grace period for scene tracking (seconds)
   },
   
   "plate_modifiers": {

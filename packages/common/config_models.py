@@ -17,4 +17,10 @@ class RetentionSettings:
     # Used for cross-camera intent persistence (e.g., fire fighter at driveway → door)
     # Default: 3600 seconds = 1 hour
     intent_persistence_window_s: int = 3600
+    
+    # Grace period for scene tracking (in seconds)
+    # How long to wait before marking an object as "exited" when not detected
+    # Prevents false exits during brief occlusions or camera handoffs
+    # Default: 6 seconds
+    scene_tracking_grace_period_s: int = 6
 
