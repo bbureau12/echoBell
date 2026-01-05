@@ -173,7 +173,8 @@ def test_db(tmp_path):
             min_conf REAL DEFAULT 0.0,
             urgency INTEGER DEFAULT 10,
             scope_any_of TEXT DEFAULT '',
-            enabled INTEGER DEFAULT 1
+            enabled INTEGER DEFAULT 1,
+            contributes_standalone INTEGER DEFAULT 1 NOT NULL
         )
     """)
     

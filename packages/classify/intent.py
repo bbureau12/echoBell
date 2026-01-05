@@ -215,18 +215,19 @@ def _score_signal_rules(conn: sqlite3.Connection, vision: VisionResult):
     rows = conn.execute("""
         SELECT id, source, feature, operator, value, intent_name,
                weight, min_conf, urgency,
-               COALESCE(scope_any_of,'')
+               COALESCE(scope_any_of,''),
+               COALESCE(contributes_standalone, 1)
         FROM signal_rule
         WHERE enabled = 1
     """).fetchall()
 
     # Index rules by (source, feature) so we don't scan all rules for every evidence item
     rules_by_key = defaultdict(list)
-    for (rule_id, source, feature, op, val, intent, weight, min_conf, urg, scope_any_of) in rows:
+    for (rule_id, source, feature, op, val, intent, weight, min_conf, urg, scope_any_of, contrib_standalone) in rows:
         rules_by_key[(str(source), str(feature))].append(
             (int(rule_id), str(op), str(val), str(intent),
              float(weight) if weight is not None else 1.0, float(min_conf or 0.0), int(urg or 10),
-             str(scope_any_of or ""))
+             str(scope_any_of or ""), int(contrib_standalone) if contrib_standalone is not None else 1)
         )
 
     scores: Dict[str, float] = defaultdict(float)
@@ -244,7 +245,7 @@ def _score_signal_rules(conn: sqlite3.Connection, vision: VisionResult):
         # precompute labels for scoped rules
         ev_labels = ancestor_labels(ev_obj_id) if ev_obj_id is not None else set()
 
-        for (rule_id, op, val, intent, weight, min_conf, urg, scope_any_of) in rules_by_key.get((ev_source, ev_feature), []):
+        for (rule_id, op, val, intent, weight, min_conf, urg, scope_any_of, contrib_standalone) in rules_by_key.get((ev_source, ev_feature), []):
             # confidence gate
             if ev_conf < min_conf:
                 continue
@@ -271,19 +272,27 @@ def _score_signal_rules(conn: sqlite3.Connection, vision: VisionResult):
 
             delta = float(weight) * ev_conf
 
-            # standalone scoring (if you want some rules to be "group-only" later,
-            # this is where you'd gate it with a contributes_standalone column)
-            if delta > 0.0:
+            # standalone scoring (only if contributes_standalone=1)
+            if delta > 0.0 and contrib_standalone:
                 scores[intent] += delta
                 urgencies[intent].append(urg)
 
             scope_dbg = ",".join(sorted(allowed_scopes)) if allowed_scopes else "*"
-            trace.append(
-                f"[signal_rule {rule_id}] {intent} +{delta:.2f} "
-                f"(w={weight:.2f}*conf={ev_conf:.2f}, urg={urg}) "
-                f"because ev(src={ev_source} feat={ev_feature} val={ev_val} obj={ev_obj_id}) "
-                f"{op} '{rule_val}' scope={scope_dbg}"
-            )
+            # For group-only rules, show actual standalone contribution (0.00) in trace
+            if not contrib_standalone:
+                trace.append(
+                    f"[signal_rule {rule_id}] {intent} +0.00 (group-only, potential={delta:.2f}) "
+                    f"(w={weight:.2f}*conf={ev_conf:.2f}, urg={urg}) "
+                    f"because ev(src={ev_source} feat={ev_feature} val={ev_val} obj={ev_obj_id}) "
+                    f"{op} '{rule_val}' scope={scope_dbg}"
+                )
+            else:
+                trace.append(
+                    f"[signal_rule {rule_id}] {intent} +{delta:.2f} "
+                    f"(w={weight:.2f}*conf={ev_conf:.2f}, urg={urg}) "
+                    f"because ev(src={ev_source} feat={ev_feature} val={ev_val} obj={ev_obj_id}) "
+                    f"{op} '{rule_val}' scope={scope_dbg}"
+                )
 
             # record match for grouping
             rule_matches.append(

@@ -8,6 +8,10 @@ from ultralytics import YOLO
 import cv2
 import sys, os
 
+import cv2
+import numpy as np
+from typing import Dict, List
+
 from packages.data.cache.cache import Cache
 from packages.perception.plate_heurystics import (
     is_plate_candidate, is_plate_component, group_plate_tokens, 
@@ -42,18 +46,26 @@ POSITIVE_CLASSES = {
     "tie": "tie",
 }
 
-CSS_COLORS = {
-    "black":  (0, 0, 0),
-    "white":  (255, 255, 255),
-    "gray":   (128, 128, 128),
-    "red":    (200, 40, 40),
-    "green":  (40, 160, 40),
-    "blue":   (40, 80, 200),
-    "yellow": (220, 220, 40),
-    "orange": (230, 140, 40),
-    "brown":  (140, 90, 40),
-    "tan":    (210, 180, 140),
+# Color definitions combining RGB (for nearest-color matching) and HSV ranges (for palette extraction)
+COLORS = {
+    "black":  {"rgb": (0, 0, 0),         "hsv": ((0, 0, 0), (180, 255, 50))},
+    "white":  {"rgb": (255, 255, 255),   "hsv": ((0, 0, 200), (180, 40, 255))},
+    "gray":   {"rgb": (128, 128, 128),   "hsv": ((0, 0, 50), (180, 40, 200))},
+    "red":    {"rgb": (200, 40, 40),     "hsv": ((160, 80, 50), (10, 255, 255))},
+    "orange": {"rgb": (230, 140, 40),    "hsv": ((10, 80, 50), (25, 255, 255))},
+    "yellow": {"rgb": (220, 220, 40),    "hsv": ((25, 80, 50), (35, 255, 255))},
+    "green":  {"rgb": (40, 160, 40),     "hsv": ((35, 60, 50), (85, 255, 255))},
+    "blue":   {"rgb": (40, 80, 200),     "hsv": ((85, 60, 50), (130, 255, 255))},
+    "purple": {"rgb": (128, 0, 128),     "hsv": ((130, 60, 50), (160, 255, 255))},
+    "brown":  {"rgb": (140, 90, 40),     "hsv": ((10, 60, 20), (30, 200, 160))},  # Fixed: V upper from 100 to 160
+    "tan":    {"rgb": (210, 180, 140),   "hsv": None},  # No HSV range for tan
 }
+
+# Legacy aliases for backwards compatibility
+CSS_COLORS = {name: data["rgb"] for name, data in COLORS.items() if data["rgb"]}
+CANONICAL_COLORS = {name: data["hsv"] for name, data in COLORS.items() if data["hsv"]}
+
+
 
 MIN_CONF = {
     "person": 0.45,
@@ -62,6 +74,8 @@ MIN_CONF = {
     "package": 0.35,
     "dog": 0.35,
 }
+
+
 
 def _derive_flags(labels: List[str]) -> dict:
     return {
@@ -220,6 +234,65 @@ def _closest_color_name(rgb: np.ndarray) -> str:
             best_name, best_dist = name, dist
     return best_name
 
+
+def extract_color_palette(
+    image_bgr: np.ndarray,
+    *,
+    min_fraction: float = 0.08,
+    blur_kernel: int = 5
+) -> Dict[str, float]:
+    """
+    Extract a palette of canonical colors present in an image.
+
+    Args:
+        image_bgr: Cropped image (vehicle or person) in BGR format.
+        min_fraction: Minimum fraction of pixels for a color to count.
+        blur_kernel: Gaussian blur kernel size (odd number).
+
+    Returns:
+        Dict[str, float]: {color_name: fraction_of_pixels}
+    """
+
+    if image_bgr is None or image_bgr.size == 0:
+        return {}
+
+    # Blur to reduce noise / texture
+    if blur_kernel and blur_kernel > 1:
+        image_bgr = cv2.GaussianBlur(
+            image_bgr,
+            (blur_kernel | 1, blur_kernel | 1),
+            0
+        )
+
+    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+
+    total_pixels = hsv.shape[0] * hsv.shape[1]
+    if total_pixels == 0:
+        return {}
+
+    color_fractions: Dict[str, float] = {}
+
+    for color, (lower, upper) in CANONICAL_COLORS.items():
+        lower_np = np.array(lower, dtype=np.uint8)
+        upper_np = np.array(upper, dtype=np.uint8)
+
+        # Handle Hue wraparound (e.g., red: 160-10 wraps around 0)
+        if lower[0] > upper[0]:  # Hue wraps around
+            # Create two masks: [lower[0], 180] and [0, upper[0]]
+            mask1 = cv2.inRange(hsv, lower_np, np.array([180, upper[1], upper[2]], dtype=np.uint8))
+            mask2 = cv2.inRange(hsv, np.array([0, lower[1], lower[2]], dtype=np.uint8), upper_np)
+            mask = cv2.bitwise_or(mask1, mask2)
+        else:
+            mask = cv2.inRange(hsv, lower_np, upper_np)
+        
+        count = int(cv2.countNonZero(mask))
+
+        frac = count / total_pixels
+        if frac >= min_fraction:
+            color_fractions[color] = round(frac, 3)
+
+    return color_fractions
+
 def snapshot_and_detect(
     db: str,
     rtsp: str,
@@ -355,6 +428,30 @@ def snapshot_and_detect(
 
             obj.evidence.append(Evidence("vision", "class", det.cls.lower(), float(det.conf), object_id=obj_id))
             obj.evidence.append(Evidence("vision", "color", (det.color or "unknown").lower(), 0.6, object_id=obj_id))
+
+            # Extract color palette for vehicles and persons (provides richer color info)
+            if det.cls.lower() in ("vehicle", "person"):
+                x1, y1, x2, y2 = det.box
+                crop = frame[y1:y2, x1:x2]
+                palette = extract_color_palette(crop, min_fraction=0.05)  # 5% to catch accent colors like USPS blue stripe
+                
+                # Add palette evidence for each significant color
+                for color, fraction in palette.items():
+                    # Confidence reflects how much of the object is this color
+                    conf = min(0.95, 0.5 + (fraction * 0.5))  # Scale 0.5-0.95 based on coverage
+                    obj.evidence.append(Evidence(
+                        "vision",
+                        "palette_color",
+                        color.lower(),
+                        conf,
+                        object_id=obj_id
+                    ))
+                    if debug:
+                        print(f"  -> palette: {color} ({fraction:.1%}, conf={conf:.2f})")
+                
+                # Store palette in props for later use
+                if palette:
+                    obj.props["color_palette"] = palette
 
             vr.objects.append(obj)
 
