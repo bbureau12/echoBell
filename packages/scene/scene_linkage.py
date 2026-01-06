@@ -134,6 +134,7 @@ def compute_visit_links_for_snapshot(
     camera_id: Optional[int] = None,
     now_ts: Optional[int] = None,
     first_appearance_window_s: int = 3,
+    max_person_age_s: int = 3600,
 ) -> list[VisitEntityLink]:
     """
     Heuristic:
@@ -141,6 +142,7 @@ def compute_visit_links_for_snapshot(
       - Normalize distance by vehicle max(width, height).
       - Convert to confidence via exponential falloff and mix in detector confidences.
       - ONLY link if person JUST appeared (within first_appearance_window_s).
+      - NEVER link to vehicles that have been parked longer than max_person_age_s.
 
     Args:
         objects: List of SceneObject from vision
@@ -152,12 +154,15 @@ def compute_visit_links_for_snapshot(
         camera_id: Camera ID (for track lookup)
         now_ts: Current timestamp
         first_appearance_window_s: Only link if person appeared within this window (default 3s)
+        max_person_age_s: Don't link to vehicles older than this (default 3600s = 1 hour)
+                          Also used to prevent linking people who have been around too long
 
     Notes:
       - This is intentionally visit-scoped.
       - Works even when plate OCR fails.
       - Requires scene_tracker to have run first to populate scene_tracks.
       - Only links people who JUST entered the scene (prevents linking passersby).
+      - Refuses to link to vehicles parked for over an hour (not fresh arrivals).
     """
     persons = [o for o in objects if (getattr(o, "label", "") or "").lower() == "person" and getattr(o, "box", None)]
     vehicles = [o for o in objects if (getattr(o, "label", "") or "").lower() == "vehicle" and getattr(o, "box", None)]
@@ -165,8 +170,10 @@ def compute_visit_links_for_snapshot(
     if not persons or not vehicles:
         return []
 
-    # Build lookup of person first_seen_ts from scene_tracks
+    # Build lookup of person and vehicle first_seen_ts from scene_tracks
     person_first_seen = {}
+    vehicle_first_seen = {}
+    
     if conn and camera_id is not None:
         try:
             # Get visitor_id for each person (if available)
@@ -197,6 +204,25 @@ def compute_visit_links_for_snapshot(
                     # Try to find by temp key (would need object_id mapping, skip for now)
                     # Default: assume new if not found
                     pass
+            
+            # Query scene_tracks for vehicle tracks
+            vehicle_rows = conn.execute("""
+                SELECT track_key, first_seen_ts
+                FROM scene_tracks
+                WHERE camera_id = ? AND track_type = 'vehicle' AND active = 1
+            """, (camera_id,)).fetchall()
+            
+            vehicle_track_first_seen = {key: ts for key, ts in vehicle_rows}
+            
+            # Map vehicle object_id to first_seen_ts using plate_hmac or temp key
+            for v in vehicles:
+                v_id = int(v.object_id)
+                plate_hmac = getattr(v, "props", {}).get("plate_hmac")
+                
+                if plate_hmac and plate_hmac in vehicle_track_first_seen:
+                    vehicle_first_seen[v_id] = vehicle_track_first_seen[plate_hmac]
+                # Could also check temp keys here if needed
+            
         except Exception as e:
             # If track lookup fails, proceed without first-appearance filtering
             print(f"[LINKAGE] Warning: Could not check first_seen_ts: {e}")
@@ -214,8 +240,16 @@ def compute_visit_links_for_snapshot(
             first_seen = person_first_seen.get(p_id)
             if first_seen is not None:
                 age_s = now - first_seen
+                
+                # Don't link if person has been around too long (over max age)
+                if age_s > max_person_age_s:
+                    # Person has been in scene for too long (e.g., 1+ hour)
+                    # They likely got out of a vehicle or are a long-time visitor
+                    continue
+                
+                # Don't link if person didn't JUST appear (outside first-appearance window)
                 if age_s > first_appearance_window_s:
-                    # Person has been around too long, don't link
+                    # Person has been around too long for initial arrival linking
                     # (prevents linking passersby to parked vehicles)
                     continue
             # If first_seen not found, assume new (allow linking)
@@ -226,6 +260,17 @@ def compute_visit_links_for_snapshot(
 
         for v in vehicles:
             v_id = int(v.object_id)
+            
+            # Check if vehicle has been on scene too long
+            if vehicle_first_seen:
+                v_first_seen = vehicle_first_seen.get(v_id)
+                if v_first_seen is not None:
+                    vehicle_age_s = now - v_first_seen
+                    if vehicle_age_s > max_person_age_s:
+                        # Vehicle has been parked for over an hour
+                        # Don't link people to it (they're not arriving)
+                        continue
+            
             v_box = tuple(int(x) for x in v.box)
             vc = _center(v_box)
             vw, vh = _wh(v_box)

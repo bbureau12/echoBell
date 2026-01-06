@@ -453,6 +453,143 @@ class TestTemporalConstraints:
         
         # Should link because we can't verify age
         assert len(links) == 1
+    
+    def test_old_vehicle_prevents_linking(self, test_db):
+        """Test that vehicles parked for over an hour don't get linked to new people."""
+        now = int(time.time())
+        camera_id = 1
+        
+        # Insert vehicle track that appeared 90 minutes ago (parked for a long time)
+        test_db.execute("""
+            INSERT INTO scene_tracks (camera_id, track_type, track_key, first_seen_ts, last_seen_ts, active)
+            VALUES (?, 'vehicle', 'ABC123', ?, ?, 1)
+        """, (camera_id, now - 5400, now))  # 5400s = 90 minutes
+        test_db.commit()
+        
+        vehicle = MockSceneObject(
+            object_id=1,
+            label="vehicle",
+            box=(200, 200, 400, 300),
+            props={"conf": 0.9, "plate_hmac": "ABC123"}
+        )
+        
+        # Person that JUST appeared (1 second ago)
+        test_db.execute("""
+            INSERT INTO scene_tracks (camera_id, track_type, track_key, first_seen_ts, last_seen_ts, active)
+            VALUES (?, 'person', 'person_001', ?, ?, 1)
+        """, (camera_id, now - 1, now))
+        test_db.commit()
+        
+        person = MockSceneObject(
+            object_id=2,
+            label="person",
+            box=(410, 220, 460, 320),
+            props={"conf": 0.8, "visitor_id": "person_001"}
+        )
+        
+        links = scene_linkage.compute_visit_links_for_snapshot(
+            objects=[person, vehicle],
+            conn=test_db,
+            camera_id=camera_id,
+            now_ts=now,
+            first_appearance_window_s=3,
+            max_person_age_s=3600  # 1 hour max
+        )
+        
+        # Should NOT link because vehicle has been parked for 90 minutes
+        assert len(links) == 0
+    
+    def test_recent_vehicle_allows_linking(self, test_db):
+        """Test that recently arrived vehicles can be linked to new people."""
+        now = int(time.time())
+        camera_id = 1
+        
+        # Insert vehicle track that appeared 30 seconds ago (recent arrival)
+        test_db.execute("""
+            INSERT INTO scene_tracks (camera_id, track_type, track_key, first_seen_ts, last_seen_ts, active)
+            VALUES (?, 'vehicle', 'XYZ789', ?, ?, 1)
+        """, (camera_id, now - 30, now))
+        test_db.commit()
+        
+        vehicle = MockSceneObject(
+            object_id=1,
+            label="vehicle",
+            box=(200, 200, 400, 300),
+            props={"conf": 0.9, "plate_hmac": "XYZ789"}
+        )
+        
+        # Person that JUST appeared (1 second ago)
+        test_db.execute("""
+            INSERT INTO scene_tracks (camera_id, track_type, track_key, first_seen_ts, last_seen_ts, active)
+            VALUES (?, 'person', 'person_002', ?, ?, 1)
+        """, (camera_id, now - 1, now))
+        test_db.commit()
+        
+        person = MockSceneObject(
+            object_id=2,
+            label="person",
+            box=(410, 220, 460, 320),
+            props={"conf": 0.8, "visitor_id": "person_002"}
+        )
+        
+        links = scene_linkage.compute_visit_links_for_snapshot(
+            objects=[person, vehicle],
+            conn=test_db,
+            camera_id=camera_id,
+            now_ts=now,
+            first_appearance_window_s=3,
+            max_person_age_s=3600
+        )
+        
+        # Should link because both person and vehicle are recent
+        assert len(links) == 1
+        assert links[0].subject_object_id == 2
+        assert links[0].object_object_id == 1
+    
+    def test_old_person_and_old_vehicle_no_link(self, test_db):
+        """Test that old person + old vehicle = no link."""
+        now = int(time.time())
+        camera_id = 1
+        
+        # Insert vehicle that's been parked for 2 hours
+        test_db.execute("""
+            INSERT INTO scene_tracks (camera_id, track_type, track_key, first_seen_ts, last_seen_ts, active)
+            VALUES (?, 'vehicle', 'OLD123', ?, ?, 1)
+        """, (camera_id, now - 7200, now))
+        test_db.commit()
+        
+        vehicle = MockSceneObject(
+            object_id=1,
+            label="vehicle",
+            box=(200, 200, 400, 300),
+            props={"conf": 0.9, "plate_hmac": "OLD123"}
+        )
+        
+        # Person who appeared 10 seconds ago (outside first-appearance window)
+        test_db.execute("""
+            INSERT INTO scene_tracks (camera_id, track_type, track_key, first_seen_ts, last_seen_ts, active)
+            VALUES (?, 'person', 'person_old', ?, ?, 1)
+        """, (camera_id, now - 10, now))
+        test_db.commit()
+        
+        person = MockSceneObject(
+            object_id=2,
+            label="person",
+            box=(410, 220, 460, 320),
+            props={"conf": 0.8, "visitor_id": "person_old"}
+        )
+        
+        links = scene_linkage.compute_visit_links_for_snapshot(
+            objects=[person, vehicle],
+            conn=test_db,
+            camera_id=camera_id,
+            now_ts=now,
+            first_appearance_window_s=3,
+            max_person_age_s=3600
+        )
+        
+        # Should NOT link (person outside window, vehicle too old)
+        assert len(links) == 0
 
 
 class TestLinkageConfidenceScoring:
