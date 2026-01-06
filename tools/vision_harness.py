@@ -28,6 +28,37 @@ from packages.scene.scene_tracker import SceneTracker
 VALID_EXT = (".jpg", ".jpeg", ".png")
 
 
+def _format_evidence_value(feature: str, value) -> str:
+    """
+    Smart formatting for evidence values based on naming conventions.
+    
+    Conventions:
+    - Features ending in '_pct' or starting with 'pct_': append '%'
+    - Features ending in '_age' or '_years': append ' years'
+    - Features ending in '_seconds': append 's'
+    - Features ending in '_meters' or '_distance': append 'm'
+    - Everything else: return as-is
+    """
+    feature_lower = feature.lower()
+    
+    # Percentage-based features
+    if '_pct_' in feature_lower or feature_lower.endswith('_pct') or feature_lower.startswith('pct_'):
+        return f"{value}%"
+    
+    # Time-based features
+    if feature_lower.endswith('_age') or feature_lower.endswith('_years'):
+        return f"{value} years"
+    if feature_lower.endswith('_seconds'):
+        return f"{value}s"
+    
+    # Distance features
+    if feature_lower.endswith('_meters') or feature_lower.endswith('_distance'):
+        return f"{value}m"
+    
+    # Default: no formatting
+    return str(value)
+
+
 def cleanup_annotated_files(data_root: str):
     """
     Delete all files with 'annotated' in the filename from data folder and subfolders.
@@ -193,7 +224,9 @@ def run_dataset(db_path: str, dataset_root: str, debug: bool = False):
         # 4) Evidence summary (new world)
         print("\nEvidence (first 15):")
         for ev in (vr.evidence[:15] if vr.evidence else []):
-            print(f"  - {ev.source}.{ev.feature}={ev.value} conf={ev.conf:.2f} obj={ev.object_id}")
+            # Smart formatting based on feature naming conventions
+            val_str = _format_evidence_value(ev.feature, ev.value)
+            print(f"  - {ev.source}.{ev.feature}={val_str} conf={ev.conf:.2f} obj={ev.object_id}")
 
 
         # 5) Final classified intent

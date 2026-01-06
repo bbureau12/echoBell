@@ -439,6 +439,8 @@ def snapshot_and_detect(
                 for color, fraction in palette.items():
                     # Confidence reflects how much of the object is this color
                     conf = min(0.95, 0.5 + (fraction * 0.5))  # Scale 0.5-0.95 based on coverage
+                    
+                    # Evidence 1: Color presence (for "contains blue" rules)
                     obj.evidence.append(Evidence(
                         "vision",
                         "palette_color",
@@ -446,6 +448,18 @@ def snapshot_and_detect(
                         conf,
                         object_id=obj_id
                     ))
+                    
+                    # Evidence 2: Color percentage (for "blue > 50%" rules)
+                    # Value is integer percentage (0-100) for easier rule matching
+                    percentage = int(fraction * 100)
+                    obj.evidence.append(Evidence(
+                        "vision",
+                        f"color_pct_{color.lower()}",
+                        str(percentage),
+                        0.95,  # High confidence in the measurement itself
+                        object_id=obj_id
+                    ))
+                    
                     if debug:
                         print(f"  -> palette: {color} ({fraction:.1%}, conf={conf:.2f})")
                 

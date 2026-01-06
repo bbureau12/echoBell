@@ -264,6 +264,30 @@ def _score_signal_rules(conn: sqlite3.Connection, vision: VisionResult):
                 matched = (ev_val == rule_val)
             elif op == "contains":
                 matched = (rule_val in ev_val)
+            elif op in ("gte", ">="):
+                # Greater than or equal (numeric comparison)
+                try:
+                    matched = (float(ev_val) >= float(rule_val))
+                except (ValueError, TypeError):
+                    matched = False
+            elif op in ("lte", "<="):
+                # Less than or equal (numeric comparison)
+                try:
+                    matched = (float(ev_val) <= float(rule_val))
+                except (ValueError, TypeError):
+                    matched = False
+            elif op in ("gt", ">"):
+                # Greater than (numeric comparison)
+                try:
+                    matched = (float(ev_val) > float(rule_val))
+                except (ValueError, TypeError):
+                    matched = False
+            elif op in ("lt", "<"):
+                # Less than (numeric comparison)
+                try:
+                    matched = (float(ev_val) < float(rule_val))
+                except (ValueError, TypeError):
+                    matched = False
             else:
                 continue  # unknown operator
 
