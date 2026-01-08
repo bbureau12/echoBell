@@ -129,7 +129,7 @@ def compute_visit_links_for_snapshot(
     relation: str = "arrived_with_vehicle",
     max_norm_dist: float = 1.20,
     falloff_k: float = 1.25,
-    min_confidence: float = 0.35,
+    min_confidence: float = 0.15,  # Lowered from 0.35 to work with low-confidence detections
     conn: Optional[sqlite3.Connection] = None,
     camera_id: Optional[int] = None,
     now_ts: Optional[int] = None,
@@ -176,52 +176,33 @@ def compute_visit_links_for_snapshot(
     
     if conn and camera_id is not None:
         try:
-            # Get visitor_id for each person (if available)
-            visitor_ids = {}
-            for p in persons:
-                visitor_id = getattr(p, "props", {}).get("visitor_id")
-                if visitor_id:
-                    visitor_ids[int(p.object_id)] = visitor_id
-            
-            # Query scene_tracks for person tracks
+            # Query scene_tracks for all active tracks (person and vehicle)
             rows = conn.execute("""
-                SELECT track_key, first_seen_ts
+                SELECT track_key, first_seen_ts, track_type
                 FROM scene_tracks
-                WHERE camera_id = ? AND track_type = 'person' AND active = 1
+                WHERE camera_id = ? AND active = 1 AND track_type IN ('person', 'vehicle')
             """, (camera_id,)).fetchall()
             
-            # Map track_key (visitor_id or temp UUID) to first_seen_ts
-            track_first_seen = {key: ts for key, ts in rows}
+            # Build lookup: track_key -> first_seen_ts
+            track_first_seen = {key: ts for key, ts, _ in rows}
             
-            # Map object_id to first_seen_ts
+            # Map object_id to first_seen_ts using scene_track_key
             for p in persons:
                 p_id = int(p.object_id)
-                visitor_id = visitor_ids.get(p_id)
+                # Try scene_track_key first (set by scene_tracker), fallback to visitor_id
+                track_key = getattr(p, "props", {}).get("scene_track_key") or getattr(p, "props", {}).get("visitor_id")
                 
-                if visitor_id and visitor_id in track_first_seen:
-                    person_first_seen[p_id] = track_first_seen[visitor_id]
-                else:
-                    # Try to find by temp key (would need object_id mapping, skip for now)
-                    # Default: assume new if not found
-                    pass
+                if track_key and track_key in track_first_seen:
+                    person_first_seen[p_id] = track_first_seen[track_key]
             
-            # Query scene_tracks for vehicle tracks
-            vehicle_rows = conn.execute("""
-                SELECT track_key, first_seen_ts
-                FROM scene_tracks
-                WHERE camera_id = ? AND track_type = 'vehicle' AND active = 1
-            """, (camera_id,)).fetchall()
-            
-            vehicle_track_first_seen = {key: ts for key, ts in vehicle_rows}
-            
-            # Map vehicle object_id to first_seen_ts using plate_hmac or temp key
+            # Map vehicle object_id to first_seen_ts using scene_track_key or plate_hmac
             for v in vehicles:
                 v_id = int(v.object_id)
-                plate_hmac = getattr(v, "props", {}).get("plate_hmac")
+                # Try scene_track_key first (set by scene_tracker), fallback to plate_hmac
+                track_key = getattr(v, "props", {}).get("scene_track_key") or getattr(v, "props", {}).get("plate_hmac")
                 
-                if plate_hmac and plate_hmac in vehicle_track_first_seen:
-                    vehicle_first_seen[v_id] = vehicle_track_first_seen[plate_hmac]
-                # Could also check temp keys here if needed
+                if track_key and track_key in track_first_seen:
+                    vehicle_first_seen[v_id] = track_first_seen[track_key]
             
         except Exception as e:
             # If track lookup fails, proceed without first-appearance filtering

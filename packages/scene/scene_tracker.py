@@ -41,6 +41,7 @@ class Observation:
     box: Box
     raw_class: str | None = None
     color: str | None = None
+    object_id: int | None = None  # Vision object_id for mapping back to vision objects
     # Strong keys (optional)
     plate_hmac: str | None = None
     visitor_id: str | None = None
@@ -632,9 +633,13 @@ class SceneTracker:
         now_ts: int,
         observations: Sequence[Observation],
         event_id: str | None = None,
-    ) -> list[Evidence]:
+    ) -> tuple[list[Evidence], dict[int, str]]:
         """
-        Update scene tracks with current frame observations and return scene Evidence.
+        Update scene tracks with current frame observations.
+        
+        Returns:
+            - list[Evidence]: Scene tracking evidence entries
+            - dict[int, str]: Mapping of object_id -> track_key for matched observations
         """
         # Group observations by type
         obs_by_type: dict[str, list[Observation]] = {"vehicle": [], "person": [], "package": []}
@@ -643,6 +648,7 @@ class SceneTracker:
                 obs_by_type[o.track_type].append(o)
 
         evidence: list[Evidence] = []
+        object_to_track: dict[int, str] = {}  # Maps object_id -> track_key
 
         for track_type in ("vehicle", "person", "package"):
             active_tracks = self._load_active_tracks(conn, camera_id=camera_id, track_type=track_type)
@@ -682,6 +688,9 @@ class SceneTracker:
                         color=obs.color,
                         last_event_id=event_id,
                     )
+                    # Record mapping for this observation
+                    if obs.object_id is not None:
+                        object_to_track[obs.object_id] = tr.track_key
                     continue
 
                 # 2) IoU match against remaining active tracks
@@ -734,6 +743,9 @@ class SceneTracker:
                                 last_event_id=event_id,
                             )
                             still_present += 1
+                            # Record upgraded track key
+                            if obs.object_id is not None:
+                                object_to_track[obs.object_id] = strong_key
                         else:
                             # Create new keyed track
                             print(f"[SceneTracker] Upgrading temp track {best.track_key[:20]} to {strong_kind}={strong_key[:20]}")
@@ -750,6 +762,13 @@ class SceneTracker:
                                 last_event_id=event_id,
                             )
                             entered += 1
+                            # Record upgraded track key
+                            if obs.object_id is not None:
+                                object_to_track[obs.object_id] = strong_key
+                    else:
+                        # No upgrade - record the existing track key
+                        if obs.object_id is not None:
+                            object_to_track[obs.object_id] = best.track_key
                     continue
 
                 # 3) New track - use strong key if available, otherwise temp key
@@ -772,6 +791,9 @@ class SceneTracker:
                             last_event_id=event_id,
                         )
                         still_present += 1
+                        # Record track key for reactivated track
+                        if obs.object_id is not None:
+                            object_to_track[obs.object_id] = strong_key
                     else:
                         # New track with plate/visitor ID
                         self._insert_track(
@@ -787,6 +809,9 @@ class SceneTracker:
                             last_event_id=event_id,
                         )
                         entered += 1
+                        # Record track key for new strong-key track
+                        if obs.object_id is not None:
+                            object_to_track[obs.object_id] = strong_key
                 else:
                     # New track with temporary IoU-based key
                     temp_key = f"temp:{uuid.uuid4().hex}"
@@ -803,6 +828,9 @@ class SceneTracker:
                         last_event_id=event_id,
                     )
                     entered += 1
+                    # Record track key for new temp track
+                    if obs.object_id is not None:
+                        object_to_track[obs.object_id] = temp_key
 
             # 4) Exit tracks that were not matched, after grace period
             exited = 0
@@ -828,7 +856,7 @@ class SceneTracker:
                 evidence.append(Evidence("scene", f"{track_type}_still_present", str(still_present), 0.8, object_id=None))
 
         conn.commit()
-        return evidence
+        return evidence, object_to_track
 
 
 def build_observations_from_vision(
@@ -866,6 +894,7 @@ def build_observations_from_vision(
                 box=o.box,
                 raw_class=str(raw_class) if raw_class else None,
                 color=str(color) if color else None,
+                object_id=int(o.object_id) if o.object_id is not None else None,
                 plate_hmac=str(plate_hmac) if plate_hmac else None,
                 visitor_id=str(visitor_id) if visitor_id else None,
             )

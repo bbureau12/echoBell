@@ -174,13 +174,19 @@ def _update_scene_tracking(
     scene_tracker.ensure_schema(conn)
     observations = build_observations_from_vision(vision, plate_hmac_by_object_id=plate_hmac_by_object_id)
     
-    scene_evidence = scene_tracker.update(
+    scene_evidence, object_to_track = scene_tracker.update(
         conn,
         camera_id=camera_id,
         now_ts=now_ts,
         observations=observations,
         event_id=event_id,
     )
+    
+    # Set scene_track_key on vision objects for linkage to use
+    if vision.objects and object_to_track:
+        for obj in vision.objects:
+            if obj.object_id is not None and obj.object_id in object_to_track:
+                obj.props["scene_track_key"] = object_to_track[obj.object_id]
     
     if scene_evidence:
         vision.evidence.extend(scene_evidence)

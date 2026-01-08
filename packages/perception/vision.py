@@ -68,7 +68,7 @@ CANONICAL_COLORS = {name: data["hsv"] for name, data in COLORS.items() if data["
 
 
 MIN_CONF = {
-    "person": 0.45,
+    "person": 0.40,
     "tie": 0.50,
     "vehicle": 0.40,
     "package": 0.35,
