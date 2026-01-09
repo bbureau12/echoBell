@@ -5,8 +5,11 @@ Tests that linkage persists across frames using ReID:
 1. Image 1: Vehicle arrives (no person)
 2. Image 2: Person appears next to vehicle → linkage created
 3. Image 3: Same person (different position) → linkage persists via ReID
+4. Image 4: Different camera with facial recognition → cross-camera ReID
 
-Camera has vehicle ID capabilities but NO facial recognition.
+Cameras:
+- Camera 1: Vehicle ID only, NO facial recognition
+- Camera 2: Vehicle ID + facial recognition enabled
 """
 
 import pytest
@@ -23,246 +26,27 @@ from packages.common.types import Camera, CameraCapabilities
 from packages.classify.classify_and_log import classify_and_log
 from packages.scene.scene_tracker import SceneTracker
 from packages.common.config_models import RetentionSettings
-from packages.scene import scene_linkage
+from tests.helpers.db_setup import create_test_schema, create_test_cameras
 
 
 @pytest.fixture
 def test_db(tmp_path):
-    """Create a temporary database with all required schemas."""
+    """Create a temporary database with all required schemas and cameras."""
     db_path = tmp_path / "test_linkage_persistence.db"
     conn = sqlite3.connect(str(db_path))
     
-    # Create all required tables
-    _create_schema(conn)
+    # Create all required tables using shared setup
+    create_test_schema(conn, include_facial_recognition=True)
     
-    # Insert camera with vehicle ID but NO facial recognition
-    conn.execute("""
-        INSERT INTO camera (id, name, capability_level_id, stream_url)
-        VALUES (1, 'Test Camera - Vehicle ID Only', 1, 'rtsp://test')
-    """)
-    conn.commit()
+    # Insert both cameras using helper
+    create_test_cameras(conn, [
+        {'id': 1, 'name': 'Test Camera - Vehicle ID Only', 'capability_level_id': 1, 'stream_url': 'rtsp://test1'},
+        {'id': 2, 'name': 'Test Camera - Facial Recognition', 'capability_level_id': 2, 'stream_url': 'rtsp://test2'}
+    ])
     
     yield str(db_path), conn
     
     conn.close()
-
-
-def _create_schema(conn: sqlite3.Connection):
-    """Create all required database tables."""
-    
-    # Capability level table (for camera capabilities)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS capability_level (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            allow_facial_detail INTEGER DEFAULT 0,
-            allow_plate_ocr INTEGER DEFAULT 1,
-            allow_visitor_snapshot INTEGER DEFAULT 1
-        )
-    """)
-    
-    # Insert a capability level with vehicle ID but NO facial detail
-    conn.execute("""
-        INSERT OR IGNORE INTO capability_level (id, name, allow_facial_detail, allow_plate_ocr)
-        VALUES (1, 'Vehicle ID Only', 0, 1)
-    """)
-    
-    # Camera table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS camera (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            location_id INTEGER,
-            description TEXT,
-            capability_level_id INTEGER,
-            hostname TEXT,
-            ip_address TEXT,
-            port INTEGER,
-            protocol TEXT,
-            endpoint TEXT,
-            stream_url TEXT,
-            auth_profile_id INTEGER
-        )
-    """)
-    
-    # Scene tracks table (for vehicle/person tracking)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS scene_tracks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            camera_id INTEGER NOT NULL,
-            track_type TEXT NOT NULL,
-            key_kind TEXT NOT NULL,
-            track_key TEXT NOT NULL,
-            first_seen_ts INTEGER NOT NULL,
-            last_seen_ts INTEGER NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1,
-            last_box_json TEXT,
-            raw_class TEXT,
-            color TEXT,
-            tags TEXT,
-            last_event_id TEXT,
-            UNIQUE(camera_id, track_type, track_key)
-        )
-    """)
-    
-    # Visit entity links table (for person-vehicle relationships)
-    scene_linkage.ensure_schema(conn)
-    
-    # Known visitors table (for ReID visitor tracking)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS known_visitors (
-            visitor_id TEXT PRIMARY KEY,
-            first_seen_ts INTEGER NOT NULL,
-            last_seen_ts INTEGER NOT NULL,
-            visit_count_total INTEGER NOT NULL DEFAULT 1,
-            visit_count_7d INTEGER NOT NULL DEFAULT 1,
-            visit_count_30d INTEGER NOT NULL DEFAULT 1,
-            confidence_score REAL NOT NULL DEFAULT 0.0,
-            status TEXT NOT NULL DEFAULT 'active',
-            intent_last TEXT,
-            intent_last_ts INTEGER,
-            notes TEXT
-        )
-    """)
-    
-    # Visitor embeddings table (for ReID)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS visitor_embeddings (
-            embedding_id TEXT PRIMARY KEY,
-            visitor_id TEXT NOT NULL,
-            model_name TEXT NOT NULL,
-            embedding_dim INTEGER NOT NULL,
-            embedding_blob BLOB NOT NULL,
-            source_event_id TEXT,
-            created_ts INTEGER NOT NULL,
-            quality_score REAL NOT NULL DEFAULT 1.0,
-            camera_id INTEGER
-        )
-    """)
-    
-    # Visitor event table (for events/visits)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS visitor_events (
-            event_id TEXT PRIMARY KEY,
-            visitor_id TEXT,
-            camera_id INTEGER,
-            detected_ts TEXT NOT NULL,
-            intent_inferred TEXT,
-            intent_confidence REAL,
-            intent_locked INTEGER NOT NULL DEFAULT 0,
-            duration_s REAL,
-            evidence_json TEXT,
-            snapshot_path TEXT,
-            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-        )
-    """)
-    
-    # Intent/signal tables (required for classify_and_log)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS intent_def (
-            name TEXT PRIMARY KEY,
-            description TEXT,
-            urgency INTEGER DEFAULT 0
-        )
-    """)
-    
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS pattern_def (
-            pattern TEXT NOT NULL,
-            is_regex INTEGER DEFAULT 0,
-            intent_name TEXT,
-            entity_name TEXT,
-            weight REAL DEFAULT 1.0,
-            enabled INTEGER DEFAULT 1
-        )
-    """)
-    
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS entity_def (
-            name TEXT PRIMARY KEY,
-            tag TEXT,
-            weight REAL DEFAULT 0.5,
-            description TEXT
-        )
-    """)
-    
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS signal_rule (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source TEXT NOT NULL,
-            feature TEXT NOT NULL,
-            operator TEXT NOT NULL,
-            value TEXT NOT NULL,
-            intent_name TEXT NOT NULL,
-            weight REAL DEFAULT 1.0,
-            min_conf REAL DEFAULT 0.0,
-            urgency INTEGER DEFAULT 0,
-            scope_any_of TEXT,
-            contributes_standalone INTEGER DEFAULT 1,
-            enabled INTEGER DEFAULT 1
-        )
-    """)
-    
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS signal_group (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            intent_name TEXT NOT NULL,
-            group_mode TEXT DEFAULT 'all',
-            bind_scope TEXT,
-            base_weight REAL DEFAULT 1.0,
-            urgency INTEGER DEFAULT 0,
-            enabled INTEGER DEFAULT 1
-        )
-    """)
-    
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS signal_group_member (
-            group_id INTEGER NOT NULL,
-            rule_id INTEGER NOT NULL,
-            required INTEGER DEFAULT 0,
-            weight_mul REAL DEFAULT 1.0,
-            enabled INTEGER DEFAULT 1,
-            PRIMARY KEY (group_id, rule_id)
-        )
-    """)
-    
-    # Vision class map (required for snapshot_and_detect)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS vision_class_map (
-            id INTEGER PRIMARY KEY,
-            model_name TEXT NOT NULL,
-            raw_class TEXT NOT NULL,
-            semantic_class TEXT NOT NULL,
-            enabled INTEGER NOT NULL DEFAULT 1
-        )
-    """)
-    
-    # Insert default mappings for person and vehicle
-    conn.execute("""
-        INSERT OR IGNORE INTO vision_class_map (model_name, raw_class, semantic_class, enabled)
-        VALUES 
-            ('yolov8n', 'person', 'person', 1),
-            ('yolov8n', 'car', 'vehicle', 1),
-            ('yolov8n', 'truck', 'vehicle', 1),
-            ('yolov8n', 'bus', 'vehicle', 1),
-            ('yolov8n', 'airplane', 'vehicle', 1)
-    """)
-    
-    # Attach rule table (for parent-child object relationships)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS attach_rule (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            child_label TEXT NOT NULL,
-            parent_any_of TEXT NOT NULL,
-            min_containment REAL DEFAULT 0.5,
-            min_parent_conf REAL DEFAULT 0.4,
-            prefer_parent TEXT,
-            enabled INTEGER DEFAULT 1
-        )
-    """)
-    
-    conn.commit()
 
 
 def test_person_vehicle_linkage_persists_via_reid(test_db):
@@ -462,18 +246,7 @@ def test_person_vehicle_linkage_persists_via_reid(test_db):
     print("\n[TEST] Processing image 4 (different camera with facial recognition)...")
     now_ts += 10
     
-    camera_id_2 = 2
-    
-    # Create second camera with facial recognition enabled
-    conn.execute("""
-        INSERT OR IGNORE INTO capability_level (id, name, allow_facial_detail, allow_plate_ocr)
-        VALUES (2, 'Facial Recognition Enabled', 1, 1)
-    """)
-    conn.execute("""
-        INSERT INTO camera (id, name, capability_level_id, stream_url)
-        VALUES (2, 'Test Camera - Facial Recognition', 2, 'rtsp://test2')
-    """)
-    conn.commit()
+    camera_id_2 = 2  # Camera 2 already created in fixture with facial recognition
     
     vision4 = snapshot_and_detect(
         db=db_path,

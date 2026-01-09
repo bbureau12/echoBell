@@ -21,7 +21,7 @@ from packages.common.types import Camera, CameraCapabilities
 from packages.classify.classify_and_log import classify_and_log
 from packages.scene.scene_tracker import SceneTracker
 from packages.common.config_models import RetentionSettings
-from packages.scene import scene_linkage
+from tests.helpers.db_setup import create_test_schema, create_test_cameras
 
 
 @pytest.fixture
@@ -30,193 +30,18 @@ def test_db(tmp_path):
     db_path = tmp_path / "test_linkage.db"
     conn = sqlite3.connect(str(db_path))
     
-    # Create all required tables
-    _create_schema(conn)
+    # Create all required tables using shared setup
+    # No facial recognition needed for this test
+    create_test_schema(conn, include_facial_recognition=False)
     
-    # Camera is already created in _create_schema via capability_level
-    # Insert the actual camera record
-    conn.execute("""
-        INSERT INTO camera (id, name, capability_level_id, stream_url)
-        VALUES (1, 'Test Camera', 1, 'rtsp://test')
-    """)
-    conn.commit()
+    # Insert test camera using helper
+    create_test_cameras(conn, [
+        {'id': 1, 'name': 'Test Camera', 'capability_level_id': 1, 'stream_url': 'rtsp://test'}
+    ])
     
     yield str(db_path), conn
     
     conn.close()
-
-
-def _create_schema(conn: sqlite3.Connection):
-    """Create all required database tables."""
-    
-    # Capability level table (for camera capabilities)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS capability_level (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            allow_facial_detail INTEGER DEFAULT 0,
-            allow_plate_ocr INTEGER DEFAULT 1,
-            allow_visitor_snapshot INTEGER DEFAULT 1
-        )
-    """)
-    
-    # Insert a capability level without facial detail
-    conn.execute("""
-        INSERT OR IGNORE INTO capability_level (id, name, allow_facial_detail, allow_plate_ocr)
-        VALUES (1, 'No Facial Detail', 0, 1)
-    """)
-    
-    # Camera table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS camera (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            location_id INTEGER,
-            description TEXT,
-            capability_level_id INTEGER,
-            hostname TEXT,
-            ip_address TEXT,
-            port INTEGER,
-            protocol TEXT,
-            endpoint TEXT,
-            stream_url TEXT,
-            auth_profile_id INTEGER
-        )
-    """)
-    
-    # Scene tracks table (for vehicle/person tracking)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS scene_tracks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            camera_id INTEGER NOT NULL,
-            track_type TEXT NOT NULL,
-            key_kind TEXT NOT NULL,
-            track_key TEXT NOT NULL,
-            first_seen_ts INTEGER NOT NULL,
-            last_seen_ts INTEGER NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1,
-            last_box_json TEXT,
-            raw_class TEXT,
-            color TEXT,
-            last_event_id TEXT,
-            tags TEXT,
-            UNIQUE(camera_id, track_type, track_key)
-        )
-    """)
-    
-    # Visit entity links table (for person-vehicle linkage)
-    scene_linkage.ensure_schema(conn)
-    
-    # Visitor events table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS visitor_events (
-            event_id TEXT PRIMARY KEY,
-            visitor_id TEXT,
-            detected_ts TEXT NOT NULL,
-            intent_inferred TEXT,
-            intent_confidence REAL,
-            evidence_json TEXT,
-            camera_id INTEGER,
-            created_ts INTEGER,
-            locked INTEGER DEFAULT 0
-        )
-    """)
-    
-    # Vision map table (for YOLO class mapping)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS vision_class_map (
-            model_name TEXT NOT NULL,
-            raw_class TEXT NOT NULL,
-            semantic_class TEXT NOT NULL,
-            enabled INTEGER DEFAULT 1,
-            PRIMARY KEY (model_name, raw_class)
-        )
-    """)
-    
-    # Attach rule table (for parent-child relationships)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS attach_rule (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            child_label TEXT NOT NULL,
-            parent_any_of TEXT NOT NULL,
-            min_containment REAL DEFAULT 0.5,
-            min_parent_conf REAL DEFAULT 0.0,
-            prefer_parent TEXT,
-            enabled INTEGER DEFAULT 1
-        )
-    """)
-    
-    # Signal rules table (minimal for classification)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS intent_def (
-            name TEXT PRIMARY KEY,
-            description TEXT,
-            urgency INTEGER DEFAULT 0
-        )
-    """)
-    
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS pattern_def (
-            pattern TEXT NOT NULL,
-            is_regex INTEGER DEFAULT 0,
-            intent_name TEXT,
-            entity_name TEXT,
-            weight REAL DEFAULT 1.0,
-            enabled INTEGER DEFAULT 1
-        )
-    """)
-    
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS entity_def (
-            name TEXT PRIMARY KEY,
-            tag TEXT,
-            weight REAL DEFAULT 0.5,
-            description TEXT
-        )
-    """)
-    
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS signal_rule (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source TEXT NOT NULL,
-            feature TEXT NOT NULL,
-            operator TEXT NOT NULL,
-            value TEXT NOT NULL,
-            intent_name TEXT NOT NULL,
-            weight REAL DEFAULT 1.0,
-            min_conf REAL DEFAULT 0.0,
-            urgency INTEGER DEFAULT 0,
-            scope_any_of TEXT,
-            contributes_standalone INTEGER DEFAULT 1,
-            enabled INTEGER DEFAULT 1
-        )
-    """)
-    
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS signal_group (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            intent_name TEXT NOT NULL,
-            group_mode TEXT DEFAULT 'all',
-            bind_scope TEXT,
-            base_weight REAL DEFAULT 1.0,
-            urgency INTEGER DEFAULT 0,
-            enabled INTEGER DEFAULT 1
-        )
-    """)
-    
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS signal_group_member (
-            group_id INTEGER NOT NULL,
-            rule_id INTEGER NOT NULL,
-            required INTEGER DEFAULT 0,
-            weight_mul REAL DEFAULT 1.0,
-            enabled INTEGER DEFAULT 1,
-            PRIMARY KEY (group_id, rule_id)
-        )
-    """)
-    
-    conn.commit()
 
 
 def test_person_vehicle_linkage_temporal_flow(test_db):
