@@ -36,8 +36,8 @@ class LinkageSettings:
     
     # Time window for "first appearance" linkage (in seconds)
     # Only link people to vehicles if person appeared within this window
-    # Default: 3 seconds (person just got out of vehicle)
-    person_vehicle_first_appearance_window_s: int = 3
+    # Default: 900 seconds = 15 minutes (allows for people sitting in car)
+    person_vehicle_first_appearance_window_s: int = 900
     
     # Maximum age for person to be eligible for vehicle linkage (in seconds)
     # Prevents linking people who have been on scene too long
