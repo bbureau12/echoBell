@@ -458,4 +458,105 @@ def test_person_vehicle_linkage_persists_via_reid(test_db):
     print(f"  Vehicle: {link3[5]}")
     print(f"  Confidence: {link3[3]:.3f}")
     
-    print("\n[TEST] ✓ Test passed: Person-vehicle linkage persists via ReID!")
+    # STEP 4: Process fourth image on DIFFERENT camera with facial recognition - 10 seconds later
+    print("\n[TEST] Processing image 4 (different camera with facial recognition)...")
+    now_ts += 10
+    
+    camera_id_2 = 2
+    
+    # Create second camera with facial recognition enabled
+    conn.execute("""
+        INSERT OR IGNORE INTO capability_level (id, name, allow_facial_detail, allow_plate_ocr)
+        VALUES (2, 'Facial Recognition Enabled', 1, 1)
+    """)
+    conn.execute("""
+        INSERT INTO camera (id, name, capability_level_id, stream_url)
+        VALUES (2, 'Test Camera - Facial Recognition', 2, 'rtsp://test2')
+    """)
+    conn.commit()
+    
+    vision4 = snapshot_and_detect(
+        db=db_path,
+        rtsp=str(fixtures_dir / "4.png"),
+        camera_id=str(camera_id_2),
+        debug=True,
+        enable_ocr=False,
+    )
+    
+    # Process through full pipeline
+    classified4, event_id4 = classify_and_log(
+        db_path=db_path,
+        vision=vision4,
+        text="",
+        now_ts=now_ts,
+        camera_id=camera_id_2,
+        retention=retention,
+        scene_tracker=scene_tracker,
+    )
+    
+    # Verify: Should have detected person
+    persons4 = [obj for obj in vision4.objects if obj.label and obj.label.lower() == "person"]
+    assert len(persons4) > 0, f"Image 4 should detect person. Got: {[obj.label for obj in vision4.objects]}"
+    
+    print(f"[TEST] Image 4: {len(persons4)} person(s)")
+    
+    # Check that ReID matched this to the SAME visitor_id across cameras
+    person_tracks_cam2 = conn.execute("""
+        SELECT track_key, key_kind, first_seen_ts, last_seen_ts
+        FROM scene_tracks
+        WHERE camera_id = ? AND track_type = 'person' AND active = 1
+        ORDER BY last_seen_ts DESC
+    """, (camera_id_2,)).fetchall()
+    
+    print(f"\n[TEST] Camera 2 person tracks: {len(person_tracks_cam2)}")
+    for track in person_tracks_cam2:
+        print(f"  Track: {track[0]} (kind: {track[1]})")
+    
+    # The person should be tracked with the SAME visitor_id from camera 1
+    # ReID should have matched them across cameras
+    assert len(person_tracks_cam2) == 1, "Should have ONE person track on camera 2"
+    
+    person_track_cam2 = person_tracks_cam2[0]
+    person_track_key_img4 = person_track_cam2[0]
+    person_key_kind_img4 = person_track_cam2[1]
+    
+    # The key_kind should be "visitor" (same visitor_id from ReID)
+    assert person_key_kind_img4 == "visitor", f"Should use visitor_id key kind, got: {person_key_kind_img4}"
+    
+    # The visitor_id should match the one from camera 1
+    assert person_track_key_img4 == person_track_key_img2, \
+        f"Cross-camera ReID should match same visitor: {person_track_key_img2} vs {person_track_key_img4}"
+    
+    print(f"\n[TEST] ✓ Cross-camera ReID successful:")
+    print(f"  Camera 1 visitor_id: {person_track_key_img2}")
+    print(f"  Camera 2 visitor_id: {person_track_key_img4}")
+    print(f"  Match: {person_track_key_img2 == person_track_key_img4}")
+    
+    # Check if facial recognition was performed and visitor_id was set
+    visitor_check = conn.execute("""
+        SELECT visitor_id, first_seen_ts, last_seen_ts
+        FROM known_visitors
+        WHERE visitor_id = ?
+    """, (person_track_key_img4,)).fetchone()
+    
+    assert visitor_check is not None, "Visitor should be registered in known_visitors table"
+    print(f"\n[TEST] ✓ Visitor registered:")
+    print(f"  visitor_id: {visitor_check[0]}")
+    print(f"  First seen: {visitor_check[1]}")
+    print(f"  Last seen: {visitor_check[2]}")
+    
+    # Check if facial embedding was stored
+    embeddings = conn.execute("""
+        SELECT embedding_id, visitor_id, model_name, camera_id
+        FROM visitor_embeddings
+        WHERE visitor_id = ?
+        ORDER BY created_ts DESC
+    """, (person_track_key_img4,)).fetchall()
+    
+    print(f"\n[TEST] Facial embeddings stored: {len(embeddings)}")
+    for emb in embeddings:
+        print(f"  Embedding: {emb[0][:16]}... (visitor: {emb[1]}, model: {emb[2]}, camera: {emb[3]})")
+    
+    assert len(embeddings) > 0, "Should have at least one facial embedding stored"
+    
+    print("\n[TEST] ✓ Test passed: Cross-camera ReID with facial recognition works!")
