@@ -9,6 +9,8 @@ import math
 import sqlite3
 import time
 
+from packages.common.config_models import LinkageSettings
+
 # If you want evidence output, import lazily to avoid dependency loops.
 def _make_evidence(source: str, feature: str, value: str, conf: float, object_id: Optional[int]):
     try:
@@ -127,43 +129,49 @@ def compute_visit_links_for_snapshot(
     *,
     objects: list,  # list[SceneObject], but keep loose to avoid import cycles
     relation: str = "arrived_with_vehicle",
-    max_norm_dist: float = 1.20,
-    falloff_k: float = 1.25,
-    min_confidence: float = 0.15,  # Lowered from 0.35 to work with low-confidence detections
     conn: Optional[sqlite3.Connection] = None,
     camera_id: Optional[int] = None,
     now_ts: Optional[int] = None,
-    first_appearance_window_s: int = 3,
-    max_person_age_s: int = 3600,
+    config: Optional[LinkageSettings] = None,
+    # Deprecated parameters (kept for backwards compatibility, ignored if config provided)
+    max_norm_dist: Optional[float] = None,
+    falloff_k: Optional[float] = None,
+    min_confidence: Optional[float] = None,
+    first_appearance_window_s: Optional[int] = None,
+    max_person_age_s: Optional[int] = None,
 ) -> list[VisitEntityLink]:
     """
-    Heuristic:
-      - For each person, find nearest vehicle by bbox-center distance.
-      - Normalize distance by vehicle max(width, height).
-      - Convert to confidence via exponential falloff and mix in detector confidences.
-      - ONLY link if person JUST appeared (within first_appearance_window_s).
-      - NEVER link to vehicles that have been parked longer than max_person_age_s.
-
+    Heuristic: Link people to nearby vehicles if the person JUST appeared.
+    
     Args:
-        objects: List of SceneObject from vision
-        relation: Relationship type (e.g., "arrived_with_vehicle")
-        max_norm_dist: Maximum normalized distance to consider
-        falloff_k: Exponential falloff rate
-        min_confidence: Minimum confidence threshold
-        conn: Database connection (for checking first_seen_ts)
-        camera_id: Camera ID (for track lookup)
+        objects: List of detected objects (people, vehicles, packages)
+        relation: Type of relationship (default: "arrived_with_vehicle")
+        conn: Database connection for querying scene tracks
+        camera_id: Camera ID for scene track lookup
         now_ts: Current timestamp
-        first_appearance_window_s: Only link if person appeared within this window (default 3s)
-        max_person_age_s: Don't link to vehicles older than this (default 3600s = 1 hour)
-                          Also used to prevent linking people who have been around too long
-
-    Notes:
-      - This is intentionally visit-scoped.
-      - Works even when plate OCR fails.
-      - Requires scene_tracker to have run first to populate scene_tracks.
-      - Only links people who JUST entered the scene (prevents linking passersby).
-      - Refuses to link to vehicles parked for over an hour (not fresh arrivals).
+        config: LinkageSettings configuration object (recommended)
+        
+        # Deprecated (use config instead):
+        max_norm_dist: Maximum normalized distance
+        falloff_k: Distance falloff parameter
+        min_confidence: Minimum confidence threshold
+        first_appearance_window_s: First appearance window in seconds
+        max_person_age_s: Maximum person age in seconds
+    
+    Returns:
+        List of VisitEntityLink objects
     """
+    # Use config if provided, otherwise fall back to individual params or defaults
+    if config is None:
+        config = LinkageSettings()
+    
+    # Override config with individual params if explicitly provided (backwards compatibility)
+    _max_norm_dist = max_norm_dist if max_norm_dist is not None else config.person_vehicle_max_norm_distance
+    _falloff_k = falloff_k if falloff_k is not None else config.person_vehicle_falloff_k
+    _min_confidence = min_confidence if min_confidence is not None else config.person_vehicle_min_confidence
+    _first_appearance_window_s = first_appearance_window_s if first_appearance_window_s is not None else config.person_vehicle_first_appearance_window_s
+    _max_person_age_s = max_person_age_s if max_person_age_s is not None else config.person_vehicle_max_person_age_s
+
     persons = [o for o in objects if (getattr(o, "label", "") or "").lower() == "person" and getattr(o, "box", None)]
     vehicles = [o for o in objects if (getattr(o, "label", "") or "").lower() == "vehicle" and getattr(o, "box", None)]
 
@@ -223,13 +231,13 @@ def compute_visit_links_for_snapshot(
                 age_s = now - first_seen
                 
                 # Don't link if person has been around too long (over max age)
-                if age_s > max_person_age_s:
+                if age_s > _max_person_age_s:
                     # Person has been in scene for too long (e.g., 1+ hour)
                     # They likely got out of a vehicle or are a long-time visitor
                     continue
                 
                 # Don't link if person didn't JUST appear (outside first-appearance window)
-                if age_s > first_appearance_window_s:
+                if age_s > _first_appearance_window_s:
                     # Person has been around too long for initial arrival linking
                     # (prevents linking passersby to parked vehicles)
                     continue
@@ -247,7 +255,7 @@ def compute_visit_links_for_snapshot(
                 v_first_seen = vehicle_first_seen.get(v_id)
                 if v_first_seen is not None:
                     vehicle_age_s = now - v_first_seen
-                    if vehicle_age_s > max_person_age_s:
+                    if vehicle_age_s > _max_person_age_s:
                         # Vehicle has been parked for over an hour
                         # Don't link people to it (they're not arriving)
                         continue
@@ -270,11 +278,11 @@ def compute_visit_links_for_snapshot(
         v_id, norm, raw_d = best
 
         # Gate: too far? skip
-        if norm > float(max_norm_dist):
+        if norm > float(_max_norm_dist):
             continue
 
         # Base proximity confidence
-        prox = _exp_falloff(norm, k=float(falloff_k))
+        prox = _exp_falloff(norm, k=float(_falloff_k))
 
         # Mix in detector confidences if present
         p_det = float(getattr(p, "props", {}).get("conf", 0.7) or 0.7)
@@ -282,7 +290,7 @@ def compute_visit_links_for_snapshot(
 
         conf = prox * math.sqrt(_clamp01(p_det) * _clamp01(v_det))
 
-        if conf < float(min_confidence):
+        if conf < float(_min_confidence):
             continue
 
         # Optional stable keys if you have them:
@@ -332,8 +340,10 @@ def compute_package_to_person_links(
     camera_id: int,
     now_ts: int,
     relation: str = "carrying_package",
-    first_appearance_window_s: int = 3,
-    min_confidence: float = 0.50,
+    config: Optional[LinkageSettings] = None,
+    # Deprecated parameters - use config instead
+    first_appearance_window_s: Optional[int] = None,
+    min_confidence: Optional[float] = None,
 ) -> list[VisitEntityLink]:
     """
     Link packages to people if the package FIRST APPEARS inside a person's bounding box.
@@ -354,12 +364,28 @@ def compute_package_to_person_links(
         camera_id: Camera ID
         now_ts: Current timestamp
         relation: Relationship type (default "carrying_package")
-        first_appearance_window_s: Only link if package appeared within this window
-        min_confidence: Minimum confidence threshold
+        config: LinkageSettings with all threshold configuration
+        first_appearance_window_s: DEPRECATED - use config.package_person_first_appearance_window_s
+        min_confidence: DEPRECATED - use config.package_person_min_confidence
     
     Returns:
         List of VisitEntityLink objects linking packages to people
     """
+    if config is None:
+        config = LinkageSettings()
+    
+    # Support deprecated parameters
+    _first_appearance_window_s = (
+        first_appearance_window_s 
+        if first_appearance_window_s is not None 
+        else config.package_person_first_appearance_window_s
+    )
+    _min_confidence = (
+        min_confidence 
+        if min_confidence is not None 
+        else config.package_person_min_confidence
+    )
+    
     persons = [o for o in objects if (getattr(o, "label", "") or "").lower() == "person" and getattr(o, "box", None)]
     packages = [o for o in objects if (getattr(o, "label", "") or "").lower() == "package" and getattr(o, "box", None)]
     
@@ -389,7 +415,7 @@ def compute_package_to_person_links(
             package_first_seen[int(pkg_id)] = int(row[0])
     
     links: list[VisitEntityLink] = []
-    cutoff_ts = now_ts - first_appearance_window_s
+    cutoff_ts = now_ts - _first_appearance_window_s
     
     for pkg in packages:
         pkg_id = getattr(pkg, "object_id", None)
@@ -437,7 +463,7 @@ def compute_package_to_person_links(
                 best_containment = containment
                 best_person = person
         
-        if best_person is None or best_containment < min_confidence:
+        if best_person is None or best_containment < _min_confidence:
             continue
         
         # Get object IDs and detector confidences
@@ -494,8 +520,10 @@ def detect_package_pickup(
     camera_id: int,
     now_ts: int,
     relation: str = "picked_up_package",
-    min_dwell_time_s: int = 2,
-    min_confidence: float = 0.60,
+    config: Optional[LinkageSettings] = None,
+    # Deprecated parameters - use config instead
+    min_dwell_time_s: Optional[int] = None,
+    min_confidence: Optional[float] = None,
 ) -> list[VisitEntityLink]:
     """
     Detect when someone picks up a package that was already on the ground.
@@ -520,12 +548,28 @@ def detect_package_pickup(
         camera_id: Camera ID
         now_ts: Current timestamp
         relation: Relationship type (default "picked_up_package")
-        min_dwell_time_s: Package must be inside person bbox for this long
-        min_confidence: Minimum confidence threshold
+        config: LinkageSettings with all threshold configuration
+        min_dwell_time_s: DEPRECATED - use config.package_pickup_min_stationary_duration_s
+        min_confidence: DEPRECATED - use config.package_pickup_min_confidence
     
     Returns:
         List of VisitEntityLink for pickup events
     """
+    if config is None:
+        config = LinkageSettings()
+    
+    # Support deprecated parameters
+    _min_dwell_time_s = (
+        min_dwell_time_s 
+        if min_dwell_time_s is not None 
+        else config.package_pickup_min_stationary_duration_s
+    )
+    _min_confidence = (
+        min_confidence 
+        if min_confidence is not None 
+        else config.package_pickup_min_confidence
+    )
+    
     persons = [o for o in objects if (getattr(o, "label", "") or "").lower() == "person" and getattr(o, "box", None)]
     packages = [o for o in objects if (getattr(o, "label", "") or "").lower() == "package" and getattr(o, "box", None)]
     
@@ -655,7 +699,7 @@ def detect_package_pickup(
                 best_person = person
                 best_person_info = person_pinfo
         
-        if best_person is None or best_containment < min_confidence:
+        if best_person is None or best_containment < _min_confidence:
             continue
         
         # Check dwell time using tags
@@ -690,7 +734,7 @@ def detect_package_pickup(
             continue
         
         # Check if dwell time threshold met
-        if contained_duration < min_dwell_time_s:
+        if contained_duration < _min_dwell_time_s:
             continue  # Not long enough yet
         
         # PICKUP DETECTED!
@@ -699,10 +743,10 @@ def detect_package_pickup(
         pkg_det_conf = getattr(pkg, "conf", 0.9)
         
         # Confidence: containment * detector confs * time factor
-        time_factor = min(1.0, contained_duration / (min_dwell_time_s * 2))  # Maxes at 2x min_dwell
+        time_factor = min(1.0, contained_duration / (_min_dwell_time_s * 2))  # Maxes at 2x min_dwell
         final_conf = best_containment * person_det_conf * pkg_det_conf * time_factor
         
-        if final_conf < min_confidence:
+        if final_conf < _min_confidence:
             continue
         
         links.append(

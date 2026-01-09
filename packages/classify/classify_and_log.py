@@ -8,7 +8,7 @@ from typing import Optional, Sequence
 from packages.common.types import VisionResult
 from packages.classify.intent import classify, Classified
 from packages.data.visitor_memory import create_visitor_event, update_visitor_event_intent
-from packages.common.config_models import RetentionSettings
+from packages.common.config_models import RetentionSettings, LinkageSettings
 from packages.scene.scene_tracker import SceneTracker, build_observations_from_vision
 from packages.scene import scene_linkage
 
@@ -276,12 +276,28 @@ def _link_people_to_vehicles(
     camera_id: int,
     now_ts: int,
     event_id: str,
-    first_appearance_window_s: int = 3,
+    config: Optional[LinkageSettings] = None,
+    # Deprecated: use config instead
+    first_appearance_window_s: Optional[int] = None,
 ) -> None:
     """
     Link people to vehicles they arrived with (first appearance only).
     Adds evidence to vision result for classification.
+    
+    Args:
+        config: LinkageSettings with all threshold configuration
+        first_appearance_window_s: DEPRECATED - use config.person_vehicle_first_appearance_window_s
     """
+    if config is None:
+        config = LinkageSettings()
+    
+    # Support deprecated parameter
+    _first_appearance_window_s = (
+        first_appearance_window_s 
+        if first_appearance_window_s is not None 
+        else config.person_vehicle_first_appearance_window_s
+    )
+    
     try:
         # Compute person-to-vehicle links
         scene_linkage.ensure_schema(conn)
@@ -292,7 +308,7 @@ def _link_people_to_vehicles(
             conn=conn,
             camera_id=camera_id,
             now_ts=now_ts,
-            first_appearance_window_s=first_appearance_window_s,
+            config=config,
         )
         
         if links:
@@ -323,7 +339,7 @@ def _link_people_to_vehicles(
             camera_id=camera_id,
             now_ts=now_ts,
             relation="carrying_package",
-            first_appearance_window_s=first_appearance_window_s,
+            config=config,
         )
         
         if package_links:
@@ -354,7 +370,7 @@ def _link_people_to_vehicles(
             camera_id=camera_id,
             now_ts=now_ts,
             relation="picked_up_package",
-            min_dwell_time_s=2,  # Package must be in bbox for 2+ seconds
+            config=config,
         )
         
         if pickup_links:
@@ -536,7 +552,6 @@ def classify_and_log(
                 camera_id=camera_id,
                 now_ts=now_ts,
                 event_id=event_id,
-                first_appearance_window_s=3,  # 3 second window for "just arrived"
             )
         
         # 1d) Add visitor intent history - adds cross-camera intent persistence
