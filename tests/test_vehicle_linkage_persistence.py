@@ -57,6 +57,7 @@ def test_person_vehicle_linkage_persists_via_reid(test_db):
     3. Image 3: Same person (different pose) → linkage persists via ReID
     3.5. Image 3.5: Different person (NOT near vehicle) → separate individual, NOT linked
     4. Image 4: Different camera with facial recognition → cross-camera ReID
+    5. Image 5: Person walks past car 1 hour later → NOT linked (outside time window)
     
     Camera has vehicle ID capabilities but NO facial recognition.
     """
@@ -68,11 +69,13 @@ def test_person_vehicle_linkage_persists_via_reid(test_db):
     image2 = fixtures_dir / "2.png"
     image3 = fixtures_dir / "3.png"
     image3_5 = fixtures_dir / "3.5.png"
+    image5 = fixtures_dir / "5.png"
     
     assert image1.exists(), f"Missing test image: {image1}"
     assert image2.exists(), f"Missing test image: {image2}"
     assert image3.exists(), f"Missing test image: {image3}"
     assert image3_5.exists(), f"Missing test image: {image3_5}"
+    assert image5.exists(), f"Missing test image: {image5}"
     
     # Initialize services
     scene_tracker = SceneTracker(iou_match_threshold=0.3, grace_period_s=6)
@@ -419,4 +422,99 @@ def test_person_vehicle_linkage_persists_via_reid(test_db):
     
     assert len(embeddings) > 0, "Should have at least one facial embedding stored"
     
-    print("\n[TEST] ✓ Test passed: Cross-camera ReID with facial recognition works!")
+    print("\n[TEST] ✓ Test Step 4 passed: Cross-camera ReID with facial recognition works!")
+    
+    # STEP 5: Process image 5 (person walks past car) - 1 HOUR later on camera 1
+    print("\n[TEST] Processing image 5 (person walks past car 1 hour later)...")
+    now_ts += 3600  # Add 1 hour (3600 seconds)
+    
+    # Back to camera 1 (no facial recognition)
+    camera_id_1 = 1
+    
+    vision5 = snapshot_and_detect(
+        db=db_path,
+        rtsp=str(image5),
+        camera_id=str(camera_id_1),
+        debug=True,
+        enable_ocr=True,
+    )
+    
+    # Process through full pipeline
+    classified5, event_id5 = classify_and_log(
+        db_path=db_path,
+        vision=vision5,
+        text="",
+        now_ts=now_ts,
+        camera_id=camera_id_1,
+        retention=retention,
+        scene_tracker=scene_tracker,
+    )
+    
+    # Verify: Should have detected person
+    persons5 = [obj for obj in vision5.objects if obj.label and obj.label.lower() == "person"]
+    assert len(persons5) > 0, f"Image 5 should detect person. Got: {[obj.label for obj in vision5.objects]}"
+    
+    print(f"[TEST] Image 5: {len(persons5)} person(s)")
+    
+    # Check all active person tracks on camera 1
+    person_tracks_cam1_after_5 = conn.execute("""
+        SELECT track_key, key_kind, first_seen_ts, last_seen_ts
+        FROM scene_tracks
+        WHERE camera_id = ? AND track_type = 'person' AND active = 1
+        ORDER BY first_seen_ts ASC
+    """, (camera_id_1,)).fetchall()
+    
+    print(f"\n[TEST] Camera 1 person tracks after image 5: {len(person_tracks_cam1_after_5)}")
+    for track in person_tracks_cam1_after_5:
+        print(f"  Track: {track[0]} (kind: {track[1]}, first: {track[2]}, last: {track[3]})")
+    
+    # Find the new person from image 5 (most recent track)
+    image5_person_track = None
+    for track in person_tracks_cam1_after_5:
+        if track[3] == now_ts:  # last_seen_ts matches current timestamp
+            image5_person_track = track
+            break
+    
+    assert image5_person_track is not None, "Should have detected new person in image 5"
+    image5_person_track_key = image5_person_track[0]
+    
+    print(f"\n[TEST] Image 5 person identified:")
+    print(f"  Track key: {image5_person_track_key}")
+    print(f"  First seen: {image5_person_track[2]}")
+    print(f"  Last seen: {image5_person_track[3]}")
+    
+    # CRITICAL: Check that image 5 person is NOT linked to vehicle
+    # They appear 1 hour after vehicle arrival, outside the first_appearance_window (15 minutes)
+    image5_person_links = conn.execute("""
+        SELECT subject_type, object_type, relation, confidence, subject_key, object_key
+        FROM visit_entity_links
+        WHERE camera_id = ? AND subject_key = ?
+    """, (camera_id_1, image5_person_track_key)).fetchall()
+    
+    assert len(image5_person_links) == 0, \
+        f"Person appearing 1 hour after vehicle should NOT be linked (outside time window). Found {len(image5_person_links)} links"
+    
+    print(f"\n[TEST] ✓ Image 5 person correctly NOT linked to vehicle:")
+    print(f"  Person track: {image5_person_track_key}")
+    print(f"  Links to vehicle: {len(image5_person_links)} (expected 0)")
+    print(f"  Time since vehicle arrival: 3600 seconds (1 hour)")
+    print(f"  First appearance window: 900 seconds (15 minutes)")
+    
+    # Verify original person linkage still exists (from images 2-3)
+    original_person_links_final = conn.execute("""
+        SELECT subject_type, object_type, relation, subject_key, object_key
+        FROM visit_entity_links
+        WHERE camera_id = ? AND subject_key = ?
+    """, (camera_id_1, person_track_key_img2)).fetchall()
+    
+    assert len(original_person_links_final) > 0, "Original person should still be linked to vehicle"
+    print(f"[TEST] ✓ Original person (from image 2) still linked: {len(original_person_links_final)} link(s)")
+    
+    print("\n[TEST] ✓✓✓ ALL TESTS PASSED ✓✓✓")
+    print("[TEST] Summary:")
+    print("  ✓ Vehicle tracking works")
+    print("  ✓ Person-vehicle linkage created for person arriving with vehicle")
+    print("  ✓ ReID persistence across frames (same person)")
+    print("  ✓ Proximity filtering (person far from vehicle NOT linked)")
+    print("  ✓ Cross-camera ReID with facial recognition")
+    print("  ✓ Time window filtering (person 1 hour later NOT linked)")
