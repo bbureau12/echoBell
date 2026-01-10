@@ -55,6 +55,8 @@ def test_person_vehicle_linkage_persists_via_reid(test_db):
     1. Image 1: Vehicle only → vehicle tracked
     2. Image 2: Person + vehicle → linkage created
     3. Image 3: Same person (different pose) → linkage persists via ReID
+    3.5. Image 3.5: Different person (NOT near vehicle) → separate individual, NOT linked
+    4. Image 4: Different camera with facial recognition → cross-camera ReID
     
     Camera has vehicle ID capabilities but NO facial recognition.
     """
@@ -65,10 +67,12 @@ def test_person_vehicle_linkage_persists_via_reid(test_db):
     image1 = fixtures_dir / "1.png"
     image2 = fixtures_dir / "2.png"
     image3 = fixtures_dir / "3.png"
+    image3_5 = fixtures_dir / "3.5.png"
     
     assert image1.exists(), f"Missing test image: {image1}"
     assert image2.exists(), f"Missing test image: {image2}"
     assert image3.exists(), f"Missing test image: {image3}"
+    assert image3_5.exists(), f"Missing test image: {image3_5}"
     
     # Initialize services
     scene_tracker = SceneTracker(iou_match_threshold=0.3, grace_period_s=6)
@@ -242,9 +246,92 @@ def test_person_vehicle_linkage_persists_via_reid(test_db):
     print(f"  Vehicle: {link3[5]}")
     print(f"  Confidence: {link3[3]:.3f}")
     
-    # STEP 4: Process fourth image on DIFFERENT camera with facial recognition - 10 seconds later
+    # STEP 3.5: Process image 3.5 (different person, NOT near vehicle) - 2 seconds later
+    print("\n[TEST] Processing image 3.5 (different person, NOT near vehicle)...")
+    now_ts += 2
+    
+    vision3_5 = snapshot_and_detect(
+        db=db_path,
+        rtsp=str(image3_5),
+        camera_id=str(camera_id),
+        debug=True,
+        enable_ocr=True,
+    )
+    
+    # Process through full pipeline
+    classified3_5, event_id3_5 = classify_and_log(
+        db_path=db_path,
+        vision=vision3_5,
+        text="",
+        now_ts=now_ts,
+        camera_id=camera_id,
+        retention=retention,
+        scene_tracker=scene_tracker,
+    )
+    
+    # Verify: Should have detected person(s)
+    persons3_5 = [obj for obj in vision3_5.objects if obj.label and obj.label.lower() == "person"]
+    assert len(persons3_5) > 0, f"Image 3.5 should detect person. Got: {[obj.label for obj in vision3_5.objects]}"
+    
+    print(f"[TEST] Image 3.5: {len(persons3_5)} person(s)")
+    
+    # Check scene_tracks - should now have TWO active person tracks
+    person_tracks_after_3_5 = conn.execute("""
+        SELECT track_key, key_kind, first_seen_ts, last_seen_ts
+        FROM scene_tracks
+        WHERE camera_id = ? AND track_type = 'person' AND active = 1
+        ORDER BY first_seen_ts ASC
+    """, (camera_id,)).fetchall()
+    
+    print(f"\n[TEST] Active person tracks after image 3.5: {len(person_tracks_after_3_5)}")
+    for track in person_tracks_after_3_5:
+        print(f"  Track: {track[0]} (kind: {track[1]}, first: {track[2]}, last: {track[3]})")
+    
+    # Should have TWO person tracks: original person and new person
+    assert len(person_tracks_after_3_5) == 2, \
+        f"Should have TWO person tracks (original + new person), got {len(person_tracks_after_3_5)}"
+    
+    # Find the new person's track (the one that's NOT the original person)
+    new_person_track = None
+    for track in person_tracks_after_3_5:
+        if track[0] != person_track_key_img2:
+            new_person_track = track
+            break
+    
+    assert new_person_track is not None, "Should have identified new person track"
+    new_person_track_key = new_person_track[0]
+    
+    print(f"\n[TEST] New person identified:")
+    print(f"  Original person track: {person_track_key_img2}")
+    print(f"  New person track: {new_person_track_key}")
+    
+    # CRITICAL: Check that new person is NOT linked to the vehicle
+    new_person_links = conn.execute("""
+        SELECT subject_type, object_type, relation, confidence, subject_key, object_key
+        FROM visit_entity_links
+        WHERE camera_id = ? AND subject_key = ?
+    """, (camera_id, new_person_track_key)).fetchall()
+    
+    assert len(new_person_links) == 0, \
+        f"New person should NOT be linked to vehicle (too far away). Found {len(new_person_links)} links"
+    
+    print(f"\n[TEST] ✓ New person correctly NOT linked to vehicle:")
+    print(f"  New person track: {new_person_track_key}")
+    print(f"  Links to vehicle: {len(new_person_links)} (expected 0)")
+    
+    # Verify original person is STILL linked to vehicle
+    original_person_links = conn.execute("""
+        SELECT subject_type, object_type, relation, subject_key, object_key
+        FROM visit_entity_links
+        WHERE camera_id = ? AND subject_key = ?
+    """, (camera_id, person_track_key_img2)).fetchall()
+    
+    assert len(original_person_links) > 0, "Original person should still be linked to vehicle"
+    print(f"[TEST] ✓ Original person still linked to vehicle: {len(original_person_links)} link(s)")
+    
+    # STEP 4: Process fourth image on DIFFERENT camera with facial recognition - 8 seconds later
     print("\n[TEST] Processing image 4 (different camera with facial recognition)...")
-    now_ts += 10
+    now_ts += 8
     
     camera_id_2 = 2  # Camera 2 already created in fixture with facial recognition
     
