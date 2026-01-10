@@ -1275,7 +1275,8 @@ class TestPackageToPersonLinkage:
             conn=test_db,
             camera_id=camera_id,
             now_ts=now,
-            relation="stealing_package"
+            relation="stealing_package",
+            min_confidence=0.5  # Provide default confidence threshold
         )
         
         assert len(links) == 1
