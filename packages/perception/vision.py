@@ -392,6 +392,7 @@ def snapshot_and_detect(
                     conf=float(score),
                     box=(x1, y1, x2, y2),
                     color=color_name,
+                    raw_class=cls_name,  # Preserve original YOLO class
                 )
             )
             labels_for_flags.append(mapped)
@@ -428,6 +429,12 @@ def snapshot_and_detect(
 
             obj.evidence.append(Evidence("vision", "class", det.cls.lower(), float(det.conf), object_id=obj_id))
             obj.evidence.append(Evidence("vision", "color", (det.color or "unknown").lower(), 0.6, object_id=obj_id))
+
+            # If this is a vehicle, emit the specific vehicle type for intent rules
+            if det.cls.lower() == "vehicle" and det.raw_class:
+                obj.evidence.append(
+                    Evidence("vision", "vehicle_type", det.raw_class.lower(), float(det.conf), object_id=obj_id)
+                )
 
             # Extract color palette for vehicles and persons (provides richer color info)
             if det.cls.lower() in ("vehicle", "person"):

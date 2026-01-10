@@ -58,6 +58,25 @@ class Detection:
     # "color of the scene," preventing cross-category confusion.
     color: str
 
+    # ------------------------------------------------------------------
+    # raw_class
+    # ------------------------------------------------------------------
+    # The original YOLO class name before semantic mapping.
+    #
+    # Examples:
+    #   - "bicycle"   (mapped to semantic "vehicle")
+    #   - "car"       (mapped to semantic "vehicle")
+    #   - "truck"     (mapped to semantic "vehicle")
+    #   - "microwave" (mapped to semantic "package")
+    #
+    # Useful for:
+    #   - Intent rules that care about vehicle type ("bicycle" vs "semi")
+    #   - Analytics/logging ("what specific objects are being detected?")
+    #   - Debugging class mapping issues
+    #
+    # This preserves granularity while keeping semantic classes simple.
+    raw_class: Optional[str] = None
+
 
 @dataclass
 class Evidence:

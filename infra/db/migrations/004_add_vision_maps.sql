@@ -14,8 +14,10 @@ VALUES
     ('yolov8n', 'microwave',  'package'),
     ('yolov8n', 'oven',       'package'),
     ('yolov8n', 'suitcase',   'package'),
+    ('yolov8n', 'bicycle',    'vehicle'),  -- Added: bicycles are vehicles too!
     ('yolov8n', 'truck',      'vehicle'),
     ('yolov8n', 'car',        'vehicle'),
     ('yolov8n', 'motorbike',  'vehicle'),
+    ('yolov8n', 'bus',        'vehicle'),  -- Added: buses detected by YOLO
     ('yolov8n', 'dog',        'dog'),
     ('yolov8n', 'tie',        'tie');
