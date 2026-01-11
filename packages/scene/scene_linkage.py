@@ -120,6 +120,53 @@ def _exp_falloff(x: float, k: float = 1.0) -> float:
     return math.exp(-k * x)
 
 
+def _size_ratio_check(
+    person_box: tuple[int, int, int, int],
+    vehicle_box: tuple[int, int, int, int],
+    vehicle_type: Optional[str] = None,
+) -> bool:
+    """
+    Check if person and vehicle sizes are proportionally reasonable.
+    
+    Uses vehicle_type (raw YOLO class) to apply appropriate thresholds:
+    - Bicycles/motorcycles: Person can be larger (0.8x to 2.5x vehicle size)
+    - Cars/trucks/buses: Person should be smaller (0.15x to 0.85x vehicle size)
+    
+    Args:
+        person_box: Person bounding box (x1, y1, x2, y2)
+        vehicle_box: Vehicle bounding box (x1, y1, x2, y2)
+        vehicle_type: Raw YOLO class ("bicycle", "car", "truck", etc.)
+    
+    Returns:
+        True if size ratio is reasonable for linkage, False otherwise
+    """
+    pw, ph = _wh(person_box)
+    vw, vh = _wh(vehicle_box)
+    
+    # Use diagonal for scale-invariant comparison
+    p_diag = math.hypot(pw, ph)
+    v_diag = math.hypot(vw, vh)
+    
+    if v_diag < 5:  # Suspiciously small vehicle
+        return False
+    
+    ratio = p_diag / v_diag
+    
+    # Small vehicles (bikes, motorcycles, scooters)
+    # Person is often same size or larger
+    if vehicle_type in ("bicycle", "motorbike", "motorcycle"):
+        # Person can be 0.8x to 2.5x vehicle size
+        # Filters out: tiny head clip (< 0.8x), toy bike (> 2.5x)
+        return 0.8 <= ratio <= 2.5
+    
+    # Large vehicles (cars, trucks, buses)
+    # Person should be clearly smaller
+    else:
+        # Person should be 15% to 85% of vehicle size
+        # Filters out: tiny head clip (< 15%), person same size as car (> 85%)
+        return 0.15 <= ratio <= 0.85
+
+
 
 # -----------------------------
 # Association logic
@@ -261,6 +308,14 @@ def compute_visit_links_for_snapshot(
                         continue
             
             v_box = tuple(int(x) for x in v.box)
+            
+            # Get vehicle type for size ratio check
+            vehicle_type = getattr(v, "props", {}).get("raw_class")
+            
+            # Check size ratio (filters out head clips, misdetections)
+            if not _size_ratio_check(p_box, v_box, vehicle_type):
+                continue
+            
             vc = _center(v_box)
             vw, vh = _wh(v_box)
             scale = max(vw, vh)
