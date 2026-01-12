@@ -11,6 +11,7 @@ from packages.data.visitor_memory import create_visitor_event, update_visitor_ev
 from packages.common.config_models import RetentionSettings, LinkageSettings
 from packages.scene.scene_tracker import SceneTracker, build_observations_from_vision
 from packages.scene import scene_linkage
+from packages.data.evidence_service import EvidenceService, EvidenceRetentionConfig
 
 # NEW: only for typing; avoid hard import cycles
 from dataclasses import dataclass
@@ -487,6 +488,7 @@ def classify_and_log(
     plate_reads: Sequence[PlateRead] = (),
     plate_conf_threshold: float = 0.65,
     scene_tracker=None,
+    evidence_service: Optional[EvidenceService] = None,
 ) -> tuple[Classified, str]:
     """
     Classify intent and log visitor event with all associated data.
@@ -495,6 +497,7 @@ def classify_and_log(
     1. Enrich vision.evidence with all available context (plates, scene, linkage, history)
     2. Classify intent using enriched evidence
     3. Create visitor event and persist all data
+    4. Log evidence to evidence_log table for queryability
     
     Handles:
     - Trusted plate detection and evidence generation
@@ -505,9 +508,14 @@ def classify_and_log(
     - Visitor event creation
     - Snapshot saving
     - Intent locking when confidence is high
+    - Evidence logging to queryable database table (if evidence_service provided)
     
     Args:
         retention: Retention settings including intent_persistence_window_s (default 3600s = 1 hour)
+        evidence_service: Optional EvidenceService instance for logging evidence to database.
+                         If None, evidence logging is skipped. Create with:
+                         `from packages.data.evidence_service import create_evidence_service`
+                         `evidence_service = create_evidence_service(retention_days=30)`
     """
     # Initialize defaults
     retention = retention or RetentionSettings()
@@ -655,6 +663,63 @@ def classify_and_log(
                     "trace": classified.trace,
                 },
             )
+
+        # 3d) Log evidence to evidence_log table for queryability
+        if evidence_service and camera_id is not None:
+            try:
+                # Log all evidence for the event
+                total_logged = evidence_service.log_evidence(
+                    conn=conn,
+                    event_id=event_id,
+                    camera_id=camera_id,
+                    evidence_list=vision.evidence,
+                )
+                
+                # Additionally log evidence with track associations for people and vehicles
+                for obj in vision.objects:
+                    obj_type = obj.label.lower()
+                    
+                    # Skip if not a tracked object type
+                    if obj_type not in ("person", "vehicle"):
+                        continue
+                    
+                    # Get track key for this object
+                    track_key = None
+                    if obj_type == "person":
+                        track_key = obj.props.get("visitor_id")
+                    elif obj_type == "vehicle":
+                        # Use plate_hmac if available, otherwise skip
+                        track_key = plate_hmac_by_object_id.get(obj.object_id)
+                    
+                    if not track_key:
+                        continue
+                    
+                    # Filter evidence for this specific object
+                    obj_evidence = [
+                        ev for ev in vision.evidence
+                        if ev.object_id == obj.object_id
+                    ]
+                    
+                    if obj_evidence:
+                        # Log with track association and metadata
+                        evidence_service.log_evidence(
+                            conn=conn,
+                            event_id=event_id,
+                            camera_id=camera_id,
+                            evidence_list=obj_evidence,
+                            track_type=obj_type,
+                            track_key=track_key,
+                            metadata={
+                                'color': obj.props.get('color'),
+                                'raw_class': obj.props.get('raw_class'),
+                            }
+                        )
+                
+                print(f"[EVIDENCE] Logged {total_logged} evidence records to database")
+                
+            except Exception as e:
+                # Don't fail the whole request if evidence logging fails
+                print(f"[EVIDENCE] Warning: Failed to log evidence: {e}")
 
         conn.commit()
 

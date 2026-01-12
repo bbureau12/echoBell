@@ -8,7 +8,10 @@
   "cache_long_minutes": 1440,
   "retention": {
     "save_visitor_snapshot": true,
-    "gap_between_visits_seconds": 3600
+    "gap_between_visits_seconds": 3600,
+    "evidence_retention_days": 30,
+    "evidence_cleanup_batch_size": 1000,
+    "evidence_cleanup_enabled": true
   },
   "plate_modifiers": {
     "boost_standard_length": 0.35,
