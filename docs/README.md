@@ -12,6 +12,18 @@ Welcome to the EchoBell documentation. This directory contains comprehensive gui
 
 - **[Demo Walkthrough](demo.md)** - 5-minute feature demonstration with example scenarios. Great for understanding what EchoBell does from a user perspective.
 
+- **[Contributing Guide](../CONTRIBUTING.md)** - How to contribute to echoBell, including setup, coding standards, and pull request process.
+
+### Core References
+
+- **[Database Schema](DATABASE_SCHEMA.md)** - Complete database schema reference with all tables, indexes, and relationships. Essential for understanding data storage.
+
+- **[Types Reference](TYPES_REFERENCE.md)** - Guide to core dataclasses (Evidence, SceneObject, VisionResult) with usage patterns and common pitfalls.
+
+- **[Evidence Tracking](EVIDENCE_TRACKING.md)** - Evidence logging system for debugging and analytics. Query examples and retention management.
+
+- **[Signal Rules Reference](signal-rules-reference.md)** - Evidence-based classification rules and signal groups for intent classification.
+
 ### Architecture Decision Records (ADRs)
 
 Located in [`adr/`](adr/) - Documents significant architectural and design decisions:
@@ -30,6 +42,9 @@ Located in [`adr/`](adr/) - Documents significant architectural and design decis
 
 - **[ADR-0005](adr/ADR-0005-scene-awareness-temporal-tracking.md)** - Scene awareness & tracking  
   *Temporal tracking of vehicles/people for arrival/departure detection*
+
+- **[ADR-0011](adr/ADR-0011-vehicle-type-preservation-and-size-aware-linkage.md)** - Vehicle type preservation & size-aware linkage  
+  *Why we preserve raw vehicle types and use type-aware size ratio validation*
 
 ---
 
