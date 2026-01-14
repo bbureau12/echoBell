@@ -130,8 +130,8 @@ def _size_ratio_check(
     
     Uses vehicle_type (raw YOLO class) to apply appropriate thresholds:
     - Bicycles/motorcycles: Person can be larger (0.8x to 2.5x vehicle size)
-    - Cars/trucks/buses: Person should be smaller (0.15x to 0.85x vehicle size)
-    - Unknown/None: Defaults to car thresholds (conservative)
+    - All other vehicles: Person should be smaller (0.15x to 0.85x vehicle size)
+    - Unknown/None: Defaults to large vehicle thresholds (conservative)
     - Non-ground vehicles (airplane, boat, etc.): Reject linkage
     
     Args:
@@ -142,15 +142,16 @@ def _size_ratio_check(
     Returns:
         True if size ratio is reasonable for linkage, False otherwise
     """
-    # Define valid ground vehicle types
-    SMALL_VEHICLES = ("bicycle", "motorbike", "motorcycle")
-    LARGE_VEHICLES = ("car", "truck", "bus")
-    VALID_VEHICLE_TYPES = SMALL_VEHICLES + LARGE_VEHICLES
+    # Define two-wheeled vehicles (person often sits on them, similar size)
+    TWO_WHEELERS = ("bicycle", "motorbike", "motorcycle")
+    
+    # Define all valid ground vehicles
+    GROUND_VEHICLES = TWO_WHEELERS + ("car", "truck", "bus")
     
     # Reject linkage if vehicle type is a known non-ground vehicle
     # (e.g., airplane, boat, bird, etc. misdetected as vehicle)
-    # Note: None and "unknown" default to car thresholds (backwards compatibility)
-    if vehicle_type and vehicle_type not in VALID_VEHICLE_TYPES and vehicle_type != "unknown":
+    # Note: None and "unknown" default to large vehicle thresholds (backwards compatibility)
+    if vehicle_type and vehicle_type not in GROUND_VEHICLES and vehicle_type != "unknown":
         return False
     
     pw, ph = _wh(person_box)
@@ -165,15 +166,15 @@ def _size_ratio_check(
     
     ratio = p_diag / v_diag
     
-    # Small vehicles (bikes, motorcycles, scooters)
-    # Person is often same size or larger
-    if vehicle_type in SMALL_VEHICLES:
+    # Two-wheeled vehicles (bikes, motorcycles, scooters)
+    # Person is often same size or larger when sitting/standing with bike
+    if vehicle_type in TWO_WHEELERS:
         # Person can be 0.8x to 2.5x vehicle size
         # Filters out: tiny head clip (< 0.8x), toy bike (> 2.5x)
         return 0.8 <= ratio <= 2.5
     
-    # Large vehicles (cars, trucks, buses) OR unknown/None
-    # Person should be clearly smaller (default to conservative car thresholds)
+    # Large vehicles (cars, trucks, buses, SUVs, etc.) OR unknown/None
+    # Person should be clearly smaller (don't differentiate car vs truck - unreliable)
     else:
         # Person should be 15% to 85% of vehicle size
         # Filters out: tiny head clip (< 15%), person same size as car (> 85%)
