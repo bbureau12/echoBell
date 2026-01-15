@@ -119,6 +119,13 @@ See [Architecture: Complete Request Lifecycle](ARCHITECTURE.md#complete-request-
 4. Create signal rules
 5. See [Architecture: Extension Points](ARCHITECTURE.md#adding-new-evidence-sources)
 
+**Setting up Telegram notifications**:
+1. Create bot via @BotFather on Telegram
+2. Get chat ID from @userinfobot
+3. Set environment variables (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`)
+4. Test with `pytest tests/test_telegram_integration.py -v -s`
+5. See [Architecture: Integrations](ARCHITECTURE.md#integrations)
+
 ---
 
 ## Documentation Maintenance

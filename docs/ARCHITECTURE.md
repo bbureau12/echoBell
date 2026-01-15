@@ -15,7 +15,8 @@
 5. [Key Design Patterns](#key-design-patterns)
 6. [Database Schema](#database-schema)
 7. [Configuration System](#configuration-system)
-8. [Testing & Development](#testing--development)
+8. [Integrations](#integrations)
+9. [Testing & Development](#testing--development)
 
 ---
 
@@ -820,6 +821,79 @@ config.json           # Development
 config.prod.json      # Production
 config.test.json      # Testing
 ```
+
+---
+
+## Integrations
+
+### Telegram Notifications
+
+**Location**: `packages/integrations/telegram.py`
+
+EchoBell supports sending alerts and snapshots to Telegram via the Bot API.
+
+**Setup**:
+
+1. **Create a Telegram bot**:
+   - Message [@BotFather](https://t.me/BotFather) on Telegram
+   - Use `/newbot` command and follow instructions
+   - Save the bot token (e.g., `1234567890:ABCdefGHIjklMNOpqrsTUVwxyz`)
+
+2. **Get your chat ID**:
+   - Message [@userinfobot](https://t.me/userinfobot)
+   - It will reply with your user ID
+   - For groups: Add bot to group, then use `https://api.telegram.org/bot<TOKEN>/getUpdates`
+
+3. **Configure environment variables**:
+   ```bash
+   # PowerShell
+   $env:TELEGRAM_BOT_TOKEN = "your_bot_token_here"
+   $env:TELEGRAM_CHAT_ID = "your_chat_id_here"
+   $env:TELEGRAM_ENABLED = "true"  # Optional, defaults to true
+   
+   # Linux/Mac
+   export TELEGRAM_BOT_TOKEN="your_bot_token_here"
+   export TELEGRAM_CHAT_ID="your_chat_id_here"
+   ```
+
+**Usage**:
+
+```python
+from packages.integrations.telegram import load_telegram_config, TelegramNotifier
+
+# Load config from environment
+config = load_telegram_config()
+if config:
+    notifier = TelegramNotifier(config)
+    
+    # Send text message
+    notifier.send_message("🚨 Urgent delivery at front door!")
+    
+    # Send photo with caption
+    notifier.send_photo(
+        photo_path="snapshots/event_123.jpg",
+        caption="Delivery person detected"
+    )
+```
+
+**Features**:
+- **Automatic retry** on rate limits (429 errors)
+- **Configurable timeout** (default 10s)
+- **Enable/disable** via environment variable
+- **Graceful degradation** if not configured
+
+**Testing**:
+
+```bash
+# Set credentials
+$env:TELEGRAM_BOT_TOKEN = "your_token"
+$env:TELEGRAM_CHAT_ID = "your_chat_id"
+
+# Run integration test
+pytest tests/test_telegram_integration.py -v -s
+```
+
+See `tests/test_telegram_integration.py` for examples.
 
 ---
 
