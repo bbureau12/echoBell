@@ -120,16 +120,20 @@ EchoBell is a privacy-focused, multimodal doorbell intelligence system that:
 3. Evidence Enrichment (PHASE 1 in classify_and_log)
    └─> BEFORE classification
        ├─> _link_plates_to_event()
-       │   ├─> plate_service.upsert_plate_visit() - record visit
-       │   ├─> plate_service.is_plate_trusted() - check trusted status
+       │   ├─> plate_service.upsert_plate_visit() - record visit to plate_visitors
+       │   ├─> plate_service.is_plate_trusted() - check trusted_plates table
+       │   │   └─> Returns {plate_hmac, label, enabled} if found
        │   ├─> Add trusted_plate evidence to vision.evidence
+       │   │   └─> Evidence("plate_trust", "trusted_plate", label, 1.0)
        │   └─> Add trusted info to vehicle SceneObject.props
+       │       └─> props["trusted_label"] = label
        ├─> _update_scene_tracking()
-       │   ├─> SceneTracker.update() - track vehicles/people
+       │   ├─> SceneTracker.update() - track vehicles/people in scene_tracks
        │   ├─> Generate scene.* evidence (entered, exited, present, count)
        │   └─> Add scene evidence to vision.evidence
        └─> _link_people_to_vehicles()
            ├─> Check first_appearance_window (3 seconds)
+           ├─> Match visitor_id from trusted_person table (via face recognition)
            ├─> Link people to vehicles they arrived in
            └─> Add person_linked.vehicle_plate evidence
 
@@ -512,23 +516,570 @@ visitor_event_plate_sightings
 
 ### `packages/policy/`
 
-#### `apply.py` - Action Selection
+EchoBell's policy engine is a **declarative rule-based system** that translates evidence into actions. Policies can be managed via **YAML files** (for version control) or **REST API** (for dynamic updates).
 
-**Key Function**: `choose_action(policies, context)`
+#### Architecture Overview
 
-Selects appropriate response based on:
-- Classified intent
-- Current mode (HOME, AWAY, SLEEP)
-- Scene context (vehicle present, visitor known, etc.)
-
-Returns action plan:
-```python
-{
-    "speak": "Hello! One moment please.",
-    "notify": "delivery_app",
-    "unlock": False
-}
 ```
+Evidence Collection → Policy Evaluation → Action Execution
+       ↓                      ↓                   ↓
+  Vision, OCR,          Match conditions     Telegram, TTS,
+  Scene, Trust         against policies      Webhooks, etc.
+```
+
+#### `evaluator.py` - Policy Evaluation Engine
+
+**Key Class**: `PolicyEvaluator`
+
+```python
+evaluator = PolicyEvaluator(
+    conn=conn,
+    policy_file="config/policy_rules.yaml",  # Optional, for YAML-based
+    use_database=True  # Load from database instead of YAML
+)
+
+matches = evaluator.evaluate_all(
+    evidence=[...],  # List of Evidence objects
+    context={         # Runtime context
+        "camera_id": 1,
+        "track_key": "plate_abc123",
+        "track_duration_seconds": 300,
+        "timestamp": 1706112000
+    }
+)
+```
+
+**Returns**: List of `PolicyMatch` objects sorted by priority (highest first)
+
+#### Policy Model
+
+A policy consists of:
+
+1. **Metadata**:
+   - `id` - Unique identifier (e.g., "loitering_alert")
+   - `name` - Human-readable name
+   - `description` - What the policy does
+   - `enabled` - Active/inactive flag
+   - `priority` - Evaluation order (0-100, higher = first)
+
+2. **Conditions** - Boolean logic tree:
+   - `all` (AND) - All conditions must match
+   - `any` (OR) - At least one condition must match
+   - `not` (NOT) - Condition must NOT match
+
+3. **Actions** - What to execute when conditions match:
+   - `telegram` - Send message via Telegram Bot API
+   - `speak` - Text-to-speech announcement
+   - `webhook` - HTTP request to external service
+
+4. **Variables** (optional) - Dynamic values for message templates
+
+#### Condition Operators
+
+**Evidence Matching**:
+- `evidence_exists` - Check if evidence with source/feature exists
+- `evidence_missing` - Inverse of evidence_exists
+- `evidence_value_eq` - Evidence value equals expected value
+- `evidence_value_gt` / `evidence_value_lt` - Numeric comparisons
+- `evidence_value_contains` - String substring match
+
+**Trust Checks**:
+- `trust_check` - Check if person/vehicle is trusted
+  - `check_type: "trusted_person"` - Known individual
+  - `check_type: "trusted_plates"` - Known vehicle
+
+**Temporal Conditions**:
+- `track_duration_gt` / `track_duration_lt` - How long object has been present
+- `time_between` - Current time within window (e.g., "22:00" to "06:00")
+- `day_of_week` - Specific days (e.g., ["friday", "saturday"])
+
+**Alert Management**:
+- `no_recent_alert` - No alert sent recently (spam prevention)
+- `alert_sent_within` - Alert was sent within timeframe (for escalation)
+
+#### Example Policy (YAML)
+
+```yaml
+# config/policy_rules.yaml
+policies:
+  - id: nighttime_loitering_alert
+    name: "Nighttime Loitering Alert"
+    description: "Alert if unknown person loiters at night (>5 min)"
+    enabled: true
+    priority: 90
+    
+    conditions:
+      all:  # AND logic
+        - time_between:
+            start: "22:00"
+            end: "06:00"
+        - track_duration_gt:
+            track_type: person
+            duration_s: 300  # 5 minutes
+        - not:  # NOT logic
+            trust_check:
+              check_type: trusted_person
+        - no_recent_alert:  # Prevent spam
+            track_type: person
+            within_seconds: 600
+    
+    actions:
+      - type: telegram
+        message: "⚠️ Person loitering for {duration_minutes} min at night"
+        priority: urgent
+      - type: speak
+        text: "You are being recorded. Please leave the premises."
+    
+    variables:
+      duration_minutes: "{db.SELECT CAST((? - first_seen_ts) / 60 AS INTEGER) FROM scene_tracks WHERE track_key = ?}"
+```
+
+#### Example Policy (Database/API)
+
+```python
+# Via REST API
+import requests
+
+policy = {
+    "id": "weekend_party_mode",
+    "name": "Weekend Party Mode",
+    "description": "Reduce alerts on weekend nights",
+    "enabled": True,
+    "priority": 95,
+    "conditions": {
+        "all": [
+            {"day_of_week": {"days": ["friday", "saturday"]}},
+            {"time_between": {"start": "20:00", "end": "02:00"}}
+        ]
+    },
+    "actions": [
+        {
+            "type": "telegram",
+            "message": "🎉 Guest arriving (party mode active)",
+            "priority": "low"
+        }
+    ]
+}
+
+response = requests.post(
+    "http://localhost:8000/policies/",
+    json=policy
+)
+```
+
+#### `executor.py` - Action Execution
+
+**Key Class**: `ActionExecutor`
+
+```python
+executor = ActionExecutor(conn=conn)
+
+results = await executor.execute_actions(
+    actions=[
+        {"type": "telegram", "message": "Alert!", "priority": "urgent"},
+        {"type": "speak", "text": "Hello!"},
+        {"type": "webhook", "url": "http://...", "method": "POST"}
+    ],
+    variables={
+        "vehicle_color": "white",
+        "duration_minutes": "5"
+    },
+    context={
+        "camera_id": 1,
+        "track_key": "plate_abc123"
+    }
+)
+```
+
+**Features**:
+- Variable substitution in messages (e.g., `{vehicle_color}`)
+- Alert history recording (prevents spam)
+- Error handling and retry logic
+- Async execution with httpx
+
+#### `apply.py` - Integration Layer
+
+**Key Function**: `evaluate_policies()`
+
+```python
+from packages.policy.apply import evaluate_policies
+
+# Call after classification
+policy_results = await evaluate_policies(
+    evidence=vision.evidence,  # All collected evidence
+    context={
+        "camera_id": camera_id,
+        "track_key": track_key,
+        "track_duration_seconds": 300,
+        "timestamp": int(time.time())
+    },
+    conn=conn
+)
+
+# Returns: List of executed actions with results
+```
+
+#### Database Schema
+
+**`policy_rules` table** - Stores policies as JSON:
+
+```sql
+CREATE TABLE policy_rules (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    priority INTEGER NOT NULL DEFAULT 50,
+    conditions_json TEXT NOT NULL,     -- JSON condition tree
+    actions_json TEXT NOT NULL,        -- JSON action array
+    variables_json TEXT,               -- JSON variable definitions
+    created_ts INTEGER NOT NULL,
+    updated_ts INTEGER NOT NULL,
+    created_by TEXT DEFAULT 'system',  -- 'api', 'yaml_import', 'user'
+    tags TEXT,                         -- Space-separated tags
+    version INTEGER DEFAULT 1          -- Optimistic locking
+);
+```
+
+**`policy_executions` table** - Audit trail:
+
+```sql
+CREATE TABLE policy_executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    policy_id TEXT NOT NULL,
+    event_id TEXT,
+    track_key TEXT,
+    track_type TEXT,
+    camera_id INTEGER,
+    matched_conditions TEXT,    -- JSON: which conditions matched
+    executed_actions TEXT,      -- JSON: actions executed
+    execution_ts INTEGER NOT NULL,
+    success INTEGER DEFAULT 1,
+    error_message TEXT,
+    FOREIGN KEY(policy_id) REFERENCES policy_rules(id)
+);
+```
+
+#### Managing Policies
+
+**Option 1: YAML Files** (Version-controlled, deployment-time)
+
+```yaml
+# config/policy_rules.yaml
+policies:
+  - id: my_policy
+    name: "My Policy"
+    enabled: true
+    priority: 80
+    conditions: {...}
+    actions: [...]
+```
+
+**Load YAML policies**:
+```python
+evaluator = PolicyEvaluator(
+    conn=conn,
+    policy_file="config/policy_rules.yaml",
+    use_database=False  # Use YAML
+)
+```
+
+**Option 2: REST API** (Dynamic, runtime updates)
+
+```bash
+# List policies
+curl http://localhost:8000/policies/
+
+# Create policy
+curl -X POST http://localhost:8000/policies/ \
+  -H "Content-Type: application/json" \
+  -d '{...policy JSON...}'
+
+# Update policy
+curl -X PATCH http://localhost:8000/policies/my_policy \
+  -d '{"enabled": false}'
+
+# Delete policy
+curl -X DELETE http://localhost:8000/policies/my_policy
+```
+
+**Option 3: Database Service** (Programmatic)
+
+```python
+from packages.policy.policy_service import PolicyRulesService
+
+service = PolicyRulesService(db_path="data/echoBell.db")
+
+# Create
+service.create_policy(
+    policy_id="my_policy",
+    name="My Policy",
+    conditions={...},
+    actions=[...]
+)
+
+# Update
+service.update_policy(
+    policy_id="my_policy",
+    enabled=False
+)
+
+# Delete
+service.delete_policy("my_policy")
+```
+
+#### Migration: YAML → Database
+
+```python
+# One-time import
+from packages.policy.policy_service import PolicyRulesService
+import yaml
+
+with open("config/policy_rules.yaml") as f:
+    config = yaml.safe_load(f)
+
+service = PolicyRulesService("data/echoBell.db")
+service.import_from_yaml(
+    yaml_policies=config['policies'],
+    overwrite=True  # Update existing
+)
+
+# Then switch evaluator to database mode
+evaluator = PolicyEvaluator(conn=conn, use_database=True)
+```
+
+#### Variable System
+
+Policies support dynamic variables with these sources:
+
+1. **Evidence values**: `{vehicle_color}`, `{plate_text}`, `{confidence}`
+2. **Context values**: `{camera_id}`, `{timestamp}`, `{track_key}`
+3. **Database queries**: `{db.SELECT COUNT(*) FROM scene_tracks WHERE active=1}`
+4. **Environment variables**: `{env.HOME_MODE}`
+5. **Calculated values**: `{duration_minutes}` (from track duration)
+
+**Usage in actions**:
+```yaml
+actions:
+  - type: telegram
+    message: "Unknown {vehicle_color} {vehicle_type} at camera {camera_id}"
+  - type: webhook
+    url: "http://home-assistant:8123/api/trigger"
+    payload:
+      entity: "alert.driveway"
+      confidence: "{confidence}"
+```
+
+#### Best Practices
+
+1. **Priority Management**:
+   - 90-100: Critical/urgent policies (nighttime alerts, security)
+   - 70-89: High priority (unknown vehicles, loitering)
+   - 50-69: Normal priority (known visitors, deliveries)
+   - 10-49: Low priority (informational, logging)
+
+2. **Spam Prevention**:
+   - Always use `no_recent_alert` for repeated conditions
+   - Set appropriate `within_seconds` thresholds
+
+3. **Escalation Patterns**:
+   ```yaml
+   # First alert
+   - id: loitering_initial
+     conditions:
+       - track_duration_gt: {duration_s: 300}
+       - no_recent_alert: {within_seconds: 600}
+   
+   # Escalation alert
+   - id: loitering_escalation
+     conditions:
+       - track_duration_gt: {duration_s: 600}
+       - alert_sent_within: {within_seconds: 600}  # Previous alert sent
+   ```
+
+4. **Testing**:
+   - Test policies with sample evidence
+   - Use `enabled: false` to disable without deletion
+   - Check execution history via API
+
+5. **Version Control**:
+   - Store YAML policies in git
+   - Use `created_by` field to track origin
+   - Monitor `policy_executions` for audit trail
+
+#### API Endpoints
+
+The policy-server exposes these endpoints (see `docs/POLICY_API.md`):
+
+- `GET /policies/` - List all policies
+- `POST /policies/` - Create policy
+- `PATCH /policies/{id}` - Update policy
+- `DELETE /policies/{id}` - Delete policy
+- `POST /policies/{id}/enable` - Enable policy
+- `POST /policies/{id}/disable` - Disable policy
+- `GET /policies/{id}/history` - Execution history
+- `POST /policies/import-yaml` - Import from YAML
+
+See **[Policy API Documentation](POLICY_API.md)** for complete reference.
+
+---
+
+## Trust System
+
+EchoBell includes a comprehensive trust system for identifying known vehicles and people to make intelligent policy decisions.
+
+### Trust Registries
+
+#### 1. **Trusted Plates** (`trusted_plates` table)
+
+Identifies known vehicles by license plate HMAC.
+
+```sql
+CREATE TABLE trusted_plates (
+  plate_hmac   TEXT PRIMARY KEY,      -- Privacy-safe HMAC of plate text
+  label        TEXT NOT NULL,         -- "Wife's Car", "Delivery Van", "Neighbor"
+  created_ts   INTEGER NOT NULL,
+  enabled      INTEGER NOT NULL DEFAULT 1,
+  notes        TEXT
+);
+```
+
+**Usage Flow**:
+1. Edge captures vehicle → OCR extracts plate text (e.g., "ABC1234")
+2. `plate_service.is_plate_trusted(conn, "ABC1234")` called during evidence enrichment
+3. If found: Returns `{plate_hmac: "...", label: "Wife's Car", enabled: True}`
+4. Adds evidence: `Evidence("plate_trust", "trusted_plate", "Wife's Car", 1.0)`
+5. Policy engine uses this evidence for decisions
+
+**Management**:
+```python
+# Add trusted plate
+plate_service.add_trusted_plate(
+    conn, 
+    raw_plate_text="ABC1234",
+    label="Wife's Car",
+    enabled=True,
+    notes="2019 Honda Accord, white"
+)
+
+# Check if plate is trusted
+trust_info = plate_service.is_plate_trusted(conn, "ABC1234")
+# Returns: {"plate_hmac": "a3f2...", "label": "Wife's Car", "enabled": True}
+```
+
+#### 2. **Trusted People** (`trusted_person` + `trusted_person_embedding` tables)
+
+Identifies known individuals via facial recognition.
+
+```sql
+CREATE TABLE trusted_person (
+    trusted_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,       -- "John Doe", "Jane Smith"
+    label TEXT,                      -- "family", "neighbor", "delivery_driver"
+    created_ts INTEGER NOT NULL,
+    updated_ts INTEGER,
+    active INTEGER DEFAULT 1
+);
+
+CREATE TABLE trusted_person_embedding (
+    embedding_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trusted_id INTEGER NOT NULL,
+    embedding_type TEXT NOT NULL,   -- 'face', 'body'
+    model_name TEXT NOT NULL,       -- 'insightface', 'facenet'
+    embedding_dim INTEGER NOT NULL,
+    embedding_blob BLOB NOT NULL,   -- Serialized embedding vector
+    created_ts INTEGER NOT NULL,
+    quality_score REAL DEFAULT 1.0,
+    FOREIGN KEY (trusted_id) REFERENCES trusted_person(trusted_id)
+);
+```
+
+**Usage Flow**:
+1. Edge captures person → Face recognition extracts embedding
+2. Compare embedding against `trusted_person_embedding` table
+3. If match found (similarity > threshold): Lookup `trusted_person.name`
+4. Adds evidence: `Evidence("face", "visitor_id", "vis_abc123", 0.95)`
+5. Cross-reference with `scene_tracks` to track person movement
+6. Policy engine knows "family member home" vs "unknown person"
+
+#### 3. **Known Visitors** (`known_visitors` table)
+
+Tracks visitor patterns over time (frequency, recency, behavior).
+
+```sql
+CREATE TABLE known_visitors (
+    visitor_id TEXT PRIMARY KEY,
+    first_seen_ts INTEGER NOT NULL,
+    last_seen_ts INTEGER NOT NULL,
+    visit_count_total INTEGER NOT NULL DEFAULT 1,
+    visit_count_7d INTEGER NOT NULL DEFAULT 1,
+    visit_count_30d INTEGER NOT NULL DEFAULT 1,
+    confidence_score REAL NOT NULL DEFAULT 0.0,
+    status TEXT NOT NULL DEFAULT 'active',
+    intent_last TEXT,
+    intent_last_ts INTEGER,
+    notes TEXT
+);
+```
+
+**Usage**: Build behavioral profiles for recurring visitors (e.g., "delivery driver seen 50x in last 30 days").
+
+### Trust Flow in Evidence Enrichment
+
+```
+Edge Capture → Vision Detection
+    │
+    ├─> Vehicle detected + OCR extracts "ABC1234"
+    │   └─> _link_plates_to_event()
+    │       ├─> upsert_plate_visit() → Record in plate_visitors
+    │       ├─> is_plate_trusted("ABC1234") → Check trusted_plates
+    │       │   └─> Found: label="Wife's Car"
+    │       └─> Add Evidence("plate_trust", "trusted_plate", "Wife's Car", 1.0)
+    │
+    ├─> Person detected + Face recognition extracts embedding
+    │   └─> Face matching against trusted_person_embedding
+    │       ├─> Similarity > 0.8 → Match found (trusted_id=5, name="John Doe")
+    │       └─> Add Evidence("face", "visitor_id", "vis_john_doe", 0.92)
+    │
+    └─> Classification with ENRICHED evidence
+        ├─> "Wife's Car" + "person_linked.vehicle_plate" → family_arriving
+        ├─> Unknown plate + loitering → suspicious_activity
+        └─> "Delivery Van" + vehicle_entered → delivery_arriving
+```
+
+### Trust-Based Policy Examples
+
+**Policy 1: Unknown Vehicle Alert**
+```python
+# Condition: Vehicle detected, plate NOT in trusted_plates
+if vehicle_present and not trusted_plate_evidence:
+    actions = ["telegram_alert", "speak_greeting"]
+    message = f"Unknown {color} {vehicle_type} pulled up"
+```
+
+**Policy 2: Trusted Person Silent Entry**
+```python
+# Condition: Person with visitor_id matching trusted_person
+if visitor_id in trusted_person_ids:
+    actions = ["telegram_notification"]  # Quiet notification only
+    message = f"{person_name} arrived home"
+    speak = False  # Don't announce arrival
+```
+
+**Policy 3: Delivery Van Recognition**
+```python
+# Condition: Plate matches trusted_plates with label="Delivery Van"
+if trusted_plate_label == "Delivery Van":
+    actions = ["speak_instruction"]
+    message = "Please leave package by the door. Thank you!"
+```
+
+### Privacy Guarantees
+
+- **Plate HMACs**: Raw plate text never stored, only HMAC
+- **Face Embeddings**: Raw images not saved, only embedding vectors
+- **Trust Labels**: Human-readable labels for known entities
+- **Revocability**: Can disable trusted entries (`enabled=0`) without deletion
 
 ---
 
@@ -742,6 +1293,68 @@ CREATE TABLE signal_rule (
 );
 ```
 
+#### `trusted_plates`
+Known vehicles for trust-based policy decisions.
+
+```sql
+CREATE TABLE trusted_plates (
+    plate_hmac TEXT PRIMARY KEY,      -- Privacy-safe HMAC
+    label TEXT NOT NULL,              -- "Wife's Car", "Delivery Van"
+    created_ts INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    notes TEXT
+);
+```
+
+#### `trusted_person`
+Known individuals for facial recognition.
+
+```sql
+CREATE TABLE trusted_person (
+    trusted_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    label TEXT,                       -- "family", "neighbor", "delivery_driver"
+    created_ts INTEGER NOT NULL,
+    updated_ts INTEGER,
+    active INTEGER DEFAULT 1
+);
+```
+
+#### `alert_history`
+Tracks alerts sent to prevent spam and enable escalation.
+
+```sql
+CREATE TABLE alert_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    camera_id TEXT NOT NULL,
+    track_key TEXT NOT NULL,          -- plate_hmac, visitor_id, or temp UUID
+    track_type TEXT NOT NULL,         -- 'vehicle' or 'person'
+    policy_id TEXT,                   -- Which policy triggered alert
+    alert_type TEXT NOT NULL,         -- 'telegram', 'speak', 'sms', 'webhook'
+    message TEXT,
+    priority TEXT DEFAULT 'normal',   -- 'low', 'normal', 'urgent'
+    sent_ts INTEGER NOT NULL,
+    success INTEGER DEFAULT 1,
+    error_message TEXT,
+    FOREIGN KEY(camera_id) REFERENCES camera(id)
+);
+```
+
+**Usage Example**:
+```python
+# Check if alerted recently (within 5 minutes)
+recent_alert = conn.execute("""
+    SELECT sent_ts FROM alert_history
+    WHERE track_key = ? AND track_type = 'person'
+    AND sent_ts > ?
+    ORDER BY sent_ts DESC LIMIT 1
+""", (track_key, now_ts - 300)).fetchone()
+
+if recent_alert:
+    # Escalate: "Still here after 5 minutes"
+    send_urgent_alert()
+```
+
 ### Indexes
 
 ```sql
@@ -750,6 +1363,8 @@ CREATE INDEX idx_veps_event ON visitor_event_plate_sightings(event_id);
 CREATE INDEX idx_veps_plate ON visitor_event_plate_sightings(plate_hmac);
 CREATE INDEX idx_scene_tracks_camera_active ON scene_tracks(camera_id, active);
 CREATE INDEX idx_scene_tracks_type ON scene_tracks(track_type);
+CREATE INDEX idx_alert_history_track_time ON alert_history(track_key, track_type, sent_ts DESC);
+CREATE INDEX idx_trusted_plates_enabled ON trusted_plates(enabled);
 ```
 
 ---
@@ -1005,6 +1620,8 @@ Folder name becomes expected intent for validation.
 ## Related Documentation
 
 - [Demo Walkthrough](demo.md) - Quick feature demonstration
+- [Policy API Reference](POLICY_API.md) - REST API for dynamic policy management
+- [Policy Integration Summary](POLICY_INTEGRATION_SUMMARY.md) - Setup guide and examples
 - [ADR-00001](adr/ADR-00001-event-without-visitor.md) - Events without visitor identity
 - [ADR-00002](adr/ADR-00002-plate-privacy-hmac.md) - Plate privacy via HMAC
 - [ADR-00003](adr/ADR-00003-plates-as-events-not-identity.md) - Plate as evidence, not identity
@@ -1023,6 +1640,12 @@ Folder name becomes expected intent for validation.
 
 **Track**: Temporal sequence of observations for same object across frames
 
+**Policy**: Declarative rule that maps conditions (evidence patterns) to actions
+
+**Condition**: Boolean expression evaluated against evidence (e.g., `evidence_exists`, `time_between`)
+
+**Action**: Executable response when policy conditions match (telegram, speak, webhook)
+
 **HMAC**: Hash-based Message Authentication Code (privacy-safe plate identifier)
 
 **IoU**: Intersection over Union (bounding box overlap metric)
@@ -1032,6 +1655,10 @@ Folder name becomes expected intent for validation.
 **Event**: Single detection occurrence (may or may not have visitor_id)
 
 **Scene**: Current state of all tracked objects in camera view
+
+**Trust**: System for identifying known vehicles (plates) and people (faces) for policy decisions
+
+**Escalation**: Policy pattern where repeated conditions trigger increasingly urgent actions
 
 ---
 

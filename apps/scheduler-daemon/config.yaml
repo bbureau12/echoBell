@@ -1,0 +1,57 @@
+# Scheduler Daemon Configuration
+#
+# This daemon orchestrates edge devices, periodically triggering them
+# to capture and analyze camera feeds.
+
+# Scheduler Settings
+scheduler:
+  # How often the main loop checks for work (seconds)
+  tick_interval_s: 1.0
+  
+  # Default capture interval for cameras (can be overridden per-camera in DB)
+  default_capture_interval_s: 60
+  
+  # Stagger camera captures to avoid simultaneous load spikes
+  stagger_enabled: true
+  stagger_offset_s: 10  # Seconds between camera triggers
+  
+  # Maximum concurrent camera triggers
+  max_concurrent_captures: 5
+  
+  # Retry failed cameras
+  retry_failed_cameras: true
+  max_consecutive_failures: 5  # Disable camera after N failures
+
+# Database Settings
+database:
+  # Path to SQLite database
+  path: "../../data/echoBell.db"
+  
+  # How often to refresh camera list from database (seconds)
+  # Allows hot-reloading of camera configuration
+  camera_refresh_interval_s: 60
+
+# Policy API Integration (optional)
+# Scheduler can report health status to Policy API
+policy_api:
+  enabled: true
+  base_url: "http://localhost:8000"
+  timeout: 5.0
+  
+  # Report scheduler health periodically
+  health_report_interval_s: 300  # Every 5 minutes
+
+# Edge Camera Settings
+edge_camera:
+  # Timeout for triggering edge cameras
+  trigger_timeout_s: 10.0
+  
+  # Endpoint path on edge devices
+  trigger_endpoint: "/capture"  # POST to http://camera-url/capture
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  log_captures: true
+  log_failures: true
+  log_health_checks: false

@@ -26,12 +26,33 @@ from packages.scene.scene_tracker import SceneTracker, build_observations_from_v
 from packages.common.types import VisionResult, SceneObject, Evidence
 from packages.common.config_models import RetentionSettings
 
+# Import policy management router
+# Note: Uses dynamic import to handle file naming with dash
+import importlib.util
+POLICY_ROUTER_AVAILABLE = False
+try:
+    router_path = os.path.join(PROJECT_ROOT, "apps", "doorbell-agent", "api_policies.py")
+    if os.path.exists(router_path):
+        spec = importlib.util.spec_from_file_location("api_policies", router_path)
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            policy_router = module.router
+            POLICY_ROUTER_AVAILABLE = True
+except Exception as e:
+    print(f"[warning] Policy management router not available: {e}")
+
 # Initialize FastAPI
 app = FastAPI(
     title="EchoBell Policy API",
     description="Centralized scene tracking and decision engine for multi-camera doorbell system",
     version="1.0.0"
 )
+
+# Include policy management router if available
+if POLICY_ROUTER_AVAILABLE:
+    app.include_router(policy_router)
+    print("[info] Policy management endpoints enabled at /policies/*")
 
 # Configuration
 DB_PATH = os.getenv("ECHOBELL_DB_PATH", os.path.join(PROJECT_ROOT, "data", "echoBell.db"))
@@ -409,25 +430,121 @@ async def receive_evidence(request: ObservationRequest):
     Receive observations and evidence from edge device.
     
     Edge devices act as sensors - they observe the world and report facts.
-    This endpoint receives those facts and stores them for policy decisions.
+    This endpoint receives those facts and analyzes movement patterns.
     
     The Policy API will:
-    1. Store the evidence
-    2. Classify intent from accumulated evidence (future)
-    3. Make decisions about actions to take (future)
-    4. Trigger alerts, LLM integration, etc. (future)
+    1. Analyze object movement (position changes, exits, loitering)
+    2. Store the evidence
+    3. Classify intent from accumulated evidence (future)
+    4. Make decisions about actions to take (future)
+    5. Trigger alerts, LLM integration, etc. (future)
     
     The edge device doesn't need to know what the policy decides.
     """
     try:
         with get_db() as conn:
-            # TODO: Store evidence in database
-            # For now, just acknowledge receipt
-            # Future: persist to evidence_log table, classify intent, make policy decisions
+            # Analyze movement for objects with scene_track_keys
+            movement_evidence = []
+            
+            for obj in request.objects:
+                track_key = obj.props.get("scene_track_key")
+                if not track_key:
+                    continue
+                
+                # Get historical position from scene_tracks
+                cursor = conn.execute("""
+                    SELECT last_box_json, last_seen_ts, first_seen_ts
+                    FROM scene_tracks
+                    WHERE camera_id = ? AND track_key = ? AND active = 1
+                """, (request.camera_id, track_key))
+                
+                row = cursor.fetchone()
+                if not row:
+                    continue
+                
+                last_box_json, last_seen_ts, first_seen_ts = row
+                
+                # Parse previous bbox
+                if last_box_json:
+                    import json
+                    try:
+                        prev_bbox = json.loads(last_box_json)
+                        
+                        # Calculate movement distance
+                        curr_center_x = (obj.bbox[0] + obj.bbox[2]) / 2
+                        curr_center_y = (obj.bbox[1] + obj.bbox[3]) / 2
+                        prev_center_x = (prev_bbox[0] + prev_bbox[2]) / 2
+                        prev_center_y = (prev_bbox[1] + prev_bbox[3]) / 2
+                        
+                        dx = curr_center_x - prev_center_x
+                        dy = curr_center_y - prev_center_y
+                        distance = (dx**2 + dy**2)**0.5
+                        
+                        # Significant movement threshold (e.g., 50 pixels)
+                        if distance > 50:
+                            movement_evidence.append({
+                                "source": "movement",
+                                "feature": "position_changed",
+                                "value": f"{distance:.1f}px",
+                                "conf": 1.0,
+                                "object_id": obj.object_id
+                            })
+                        
+                        # Check for loitering (object stationary for extended time)
+                        time_in_scene = request.timestamp - first_seen_ts
+                        if distance < 20 and time_in_scene > 30:  # < 20px movement, > 30 seconds
+                            movement_evidence.append({
+                                "source": "movement",
+                                "feature": "loitering",
+                                "value": f"{time_in_scene}s",
+                                "conf": 1.0,
+                                "object_id": obj.object_id
+                            })
+                            
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        pass
+            
+            # Check for objects that left (in scene_tracks but not in current observations)
+            # Get all active tracks for this camera
+            cursor = conn.execute("""
+                SELECT track_key, track_type, id
+                FROM scene_tracks
+                WHERE camera_id = ? AND active = 1
+            """, (request.camera_id,))
+            
+            active_tracks = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+            
+            # Get track_keys from current observations
+            current_track_keys = {obj.props.get("scene_track_key") for obj in request.objects if obj.props.get("scene_track_key")}
+            
+            # Find tracks that are no longer present
+            missing_track_keys = set(active_tracks.keys()) - current_track_keys
+            
+            for track_key in missing_track_keys:
+                track_type, track_id = active_tracks[track_key]
+                
+                # Generate exit evidence
+                movement_evidence.append({
+                    "source": "movement",
+                    "feature": f"{track_type}_exited",
+                    "value": track_key,
+                    "conf": 1.0,
+                    "object_id": None
+                })
+                
+                # Mark track as inactive in database
+                conn.execute("""
+                    UPDATE scene_tracks
+                    SET active = 0, last_seen_ts = ?
+                    WHERE id = ?
+                """, (request.timestamp, track_id))
+            
+            # Log all evidence (original + movement)
+            all_evidence_count = len(request.evidence) + len(movement_evidence)
             
             print(f"[EVIDENCE] Received from camera {request.camera_id}, event {request.event_id}")
             print(f"  Objects: {len(request.objects)}")
-            print(f"  Evidence: {len(request.evidence)}")
+            print(f"  Evidence: {len(request.evidence)} original + {len(movement_evidence)} movement")
             if request.transcript:
                 print(f"  Transcript: {request.transcript}")
             
@@ -435,9 +552,13 @@ async def receive_evidence(request: ObservationRequest):
             for ev in request.evidence:
                 print(f"    - {ev.source}.{ev.feature} = {ev.value} (conf={ev.conf:.2f})")
             
+            # Log movement evidence
+            for ev in movement_evidence:
+                print(f"    - {ev['source']}.{ev['feature']} = {ev['value']} (conf={ev['conf']:.2f})")
+            
             return ObservationResponse(
                 event_id=request.event_id,
-                message=f"Logged {len(request.evidence)} evidence items from camera {request.camera_id}"
+                message=f"Logged {all_evidence_count} evidence items ({len(movement_evidence)} movement) from camera {request.camera_id}"
             )
             
     except Exception as e:

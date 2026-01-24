@@ -1,0 +1,377 @@
+# EchoBell Policy Rule Engine
+# Complex boolean logic with temporal conditions
+# Format: Declarative conditions → actions
+
+version: "2.0"
+
+# Policy evaluation engine
+policies:
+  # ==========================================
+  # SIMPLE POLICIES (AND logic)
+  # ==========================================
+  
+  - id: unknown_vehicle_arrival
+    name: "Unknown Vehicle Alert"
+    enabled: true
+    priority: 10
+    conditions:
+      all:  # AND: all conditions must be true
+        - evidence_exists:
+            source: scene
+            feature: vehicle_entered
+            value: "1"
+        - evidence_missing:
+            source: plate_trust
+            feature: trusted_plate
+    actions:
+      - type: telegram
+        priority: normal
+        message: "Unknown {vehicle_color} {vehicle_type} pulled up at {camera_name}"
+      - type: speak
+        text: "Hello! How can I help you today?"
+  
+  - id: trusted_vehicle_arrival
+    name: "Trusted Vehicle Silent Entry"
+    enabled: true
+    priority: 5
+    conditions:
+      all:
+        - evidence_exists:
+            source: plate_trust
+            feature: trusted_plate
+        - evidence_exists:
+            source: scene
+            feature: vehicle_entered
+    actions:
+      - type: telegram
+        priority: low
+        message: "{trusted_label} arrived at {camera_name}"
+      # No speak - silent entry
+  
+  - id: trusted_person_arrival
+    name: "Family Member Home"
+    enabled: true
+    priority: 5
+    conditions:
+      all:
+        - evidence_exists:
+            source: face
+            feature: visitor_id
+        - trust_check:
+            table: trusted_person
+            match_field: visitor_id
+            label_field: name
+    actions:
+      - type: telegram
+        priority: low
+        message: "{person_name} arrived home at {camera_name}"
+
+  - id: delivery_instruction
+    name: "Delivery Van Instructions"
+    enabled: true
+    priority: 15
+    conditions:
+      all:
+        - evidence_exists:
+            source: plate_trust
+            feature: trusted_plate
+        - evidence_value_contains:
+            source: plate_trust
+            feature: trusted_plate
+            contains: "Delivery"  # Matches "Amazon Delivery", "UPS Delivery"
+        - evidence_exists:
+            source: scene
+            feature: vehicle_entered
+    actions:
+      - type: speak
+        text: "Thanks for the delivery! Please leave it by the door."
+      - type: telegram
+        priority: low
+        message: "{trusted_label} at {camera_name}"
+
+  # ==========================================
+  # TEMPORAL POLICIES (time-based conditions)
+  # ==========================================
+  
+  - id: unknown_person_loitering_initial
+    name: "Unknown Person Loitering - Initial Alert"
+    enabled: true
+    priority: 20
+    conditions:
+      all:
+        - evidence_exists:
+            source: movement
+            feature: loitering
+        - track_duration_gt: 180  # Loitering for >3 minutes
+        - trust_check:
+            table: trusted_person
+            match_field: visitor_id
+            exists: false  # NOT in trusted_person table
+        - no_recent_alert:
+            track_key: current
+            alert_type: telegram
+            within_seconds: 300  # No telegram alert in last 5 minutes
+    actions:
+      - type: telegram
+        priority: normal
+        message: "⚠️ Unknown person loitering at {camera_name} for {duration_minutes} min"
+      - type: speak
+        text: "Can I help you with something?"
+
+  - id: loitering_escalation_with_lights
+    name: "Loitering Escalation - Remote Lights"
+    enabled: true
+    priority: 30
+    conditions:
+      all:
+        - evidence_exists:
+            source: movement
+            feature: loitering
+        - track_duration_gt: 180  # Still loitering after 3 minutes
+        - trust_check:
+            table: trusted_person
+            exists: false  # Unknown person
+        - alert_sent_within:
+            track_key: current
+            alert_type: telegram
+            min_seconds: 120  # Alert was sent at least 2 min ago
+            max_seconds: 600  # But less than 10 min ago
+        - any:  # OR: at least one must be true
+            - no_expected_delivery: true  # No delivery expected (future: check schedule)
+            - no_scheduled_appointment: true  # No contractor appointment (future)
+    actions:
+      - type: telegram
+        priority: urgent
+        message: "🚨 URGENT: Person STILL loitering at {camera_name} for {duration_minutes} min"
+      - type: speak
+        text: "This is private property. Please state your business or leave immediately."
+      - type: webhook
+        url: "{remote_lights_url}"
+        method: POST
+        headers:
+          Authorization: "Bearer {remote_lights_token}"
+        payload:
+          action: turn_on
+          location: "{camera_location}"
+          duration: 60  # Seconds
+          brightness: 100
+
+  # ==========================================
+  # MOVEMENT TRACKING POLICIES
+  # ==========================================
+  
+  - id: vehicle_position_changed
+    name: "Vehicle Moved Suspiciously"
+    enabled: true
+    priority: 15
+    conditions:
+      all:
+        - evidence_exists:
+            source: movement
+            feature: position_changed
+        - evidence_value_gt:
+            source: movement
+            feature: position_changed
+            threshold: 100  # Moved >100 pixels
+        - trust_check:
+            table: trusted_plates
+            exists: false
+        - time_between:
+            start: "22:00"
+            end: "06:00"  # Nighttime only
+    actions:
+      - type: telegram
+        priority: urgent
+        message: "⚠️ Unknown vehicle moving around at {camera_name} (nighttime)"
+
+  - id: unknown_vehicle_departed
+    name: "Unknown Vehicle Left"
+    enabled: true
+    priority: 5
+    conditions:
+      all:
+        - evidence_exists:
+            source: movement
+            feature: vehicle_exited
+        - evidence_missing:
+            source: plate_trust
+            feature: trusted_plate
+        - alert_sent_within:
+            track_key: current
+            alert_type: telegram
+            max_seconds: 600  # Only if we alerted about arrival <10 min ago
+    actions:
+      - type: telegram
+        priority: low
+        message: "Unknown vehicle departed from {camera_name}"
+
+  # ==========================================
+  # TIME-BASED POLICIES
+  # ==========================================
+  
+  - id: nighttime_person_alert
+    name: "Nighttime Person Detection"
+    enabled: true
+    priority: 25
+    conditions:
+      all:
+        - time_between:
+            start: "22:00"
+            end: "06:00"
+        - evidence_exists:
+            source: scene
+            feature: person_entered
+        - trust_check:
+            table: trusted_person
+            exists: false
+    actions:
+      - type: telegram
+        priority: urgent
+        message: "🌙 NIGHT ALERT: Unknown person at {camera_name}"
+      - type: webhook
+        url: "{security_system_url}"
+        method: POST
+        payload:
+          event: nighttime_intrusion
+          severity: high
+          camera: "{camera_id}"
+
+  - id: suspicious_nighttime_movement
+    name: "Suspicious Nighttime Activity"
+    enabled: true
+    priority: 30
+    conditions:
+      all:
+        - time_between:
+            start: "22:00"
+            end: "06:00"
+        - trust_check:
+            table: trusted_person
+            exists: false
+        - any:  # Either loitering OR significant movement
+            - evidence_exists:
+                source: movement
+                feature: loitering
+              track_duration_gt: 30
+            - evidence_exists:
+                source: movement
+                feature: position_changed
+              evidence_value_gt:
+                source: movement
+                feature: position_changed
+                threshold: 50
+    actions:
+      - type: telegram
+        priority: urgent
+        message: "🚨 NIGHT: Suspicious activity at {camera_name} - {activity_type}"
+      - type: speak
+        text: "Security alert. You are being monitored. Leave the property immediately."
+      - type: webhook
+        url: "{security_system_url}"
+        method: POST
+        payload:
+          event: suspicious_activity
+          severity: critical
+
+# ==========================================
+# VARIABLE TEMPLATES
+# ==========================================
+variables:
+  # Evidence-based variables
+  vehicle_color:
+    source: vision
+    feature: color
+    default: "unknown"
+  
+  vehicle_type:
+    source: vision
+    feature: vehicle_type
+    default: "vehicle"
+  
+  trusted_label:
+    source: plate_trust
+    feature: trusted_plate
+    default: "Vehicle"
+  
+  person_name:
+    lookup:
+      table: trusted_person
+      match_field: visitor_id
+      return_field: name
+    default: "Family member"
+  
+  # Camera metadata
+  camera_name:
+    lookup:
+      table: camera
+      match_field: id
+      return_field: name
+    default: "Front Door"
+  
+  camera_id:
+    from_context: camera_id
+  
+  camera_location:
+    lookup:
+      table: camera
+      match_field: id
+      return_field: location
+    default: "front"
+  
+  # Calculated variables
+  duration_minutes:
+    calculate: track_duration_seconds / 60
+    format: "%.1f"
+  
+  duration_seconds:
+    from_context: track_duration_seconds
+  
+  activity_type:
+    conditional:
+      - if: evidence_exists(movement, loitering)
+        then: "person loitering"
+      - if: evidence_exists(movement, position_changed)
+        then: "person moving around"
+      - default: "unknown activity"
+  
+  # Environment variables (for webhooks)
+  remote_lights_url:
+    env: REMOTE_LIGHTS_URL
+    default: "http://localhost:8080/lights"
+  
+  remote_lights_token:
+    env: REMOTE_LIGHTS_TOKEN
+    default: ""
+  
+  security_system_url:
+    env: SECURITY_SYSTEM_URL
+    default: "http://localhost:8081/alerts"
+
+# ==========================================
+# CONDITION OPERATORS REFERENCE
+# ==========================================
+# Available condition types:
+#
+# evidence_exists: Check if evidence exists
+# evidence_missing: Check if evidence does NOT exist
+# evidence_value_contains: Check if value contains substring
+# evidence_value_gt: Check if numeric value > threshold
+# evidence_value_lt: Check if numeric value < threshold
+# evidence_value_eq: Check if value equals expected
+#
+# trust_check: Lookup in trust registries (trusted_person, trusted_plates)
+# track_duration_gt: Track has been active for > X seconds
+# track_duration_lt: Track has been active for < X seconds
+#
+# alert_sent_within: Alert was sent within time window
+# no_recent_alert: No alert sent within time window
+#
+# time_between: Current time is between start and end (24h format)
+# day_of_week: Current day matches (mon, tue, wed, thu, fri, sat, sun)
+#
+# all: AND logic - all sub-conditions must be true
+# any: OR logic - at least one sub-condition must be true
+# not: NOT logic - inverts condition result
+#
+# no_expected_delivery: Check delivery schedule (future)
+# no_scheduled_appointment: Check appointment calendar (future)
