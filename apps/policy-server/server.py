@@ -107,6 +107,41 @@ class SceneUpdateResponse(BaseModel):
     message: str = "Scene updated successfully"
 
 
+class ObservedObject(BaseModel):
+    """Object observed by edge device."""
+    object_id: int
+    label: str  # person, vehicle, package, etc.
+    bbox: list[float]  # [x1, y1, x2, y2]
+    props: dict = Field(default_factory=dict)  # color, scene_track_key, etc.
+
+
+class EvidenceItem(BaseModel):
+    """Single piece of evidence from edge device."""
+    source: str  # vision, ocr, audio, scene, etc.
+    feature: str  # person_present, token, vehicle_entered, etc.
+    value: str
+    conf: float
+    object_id: Optional[int] = None
+
+
+class ObservationRequest(BaseModel):
+    """Evidence and observations from edge device sensor."""
+    camera_id: int
+    event_id: str
+    timestamp: int  # Unix timestamp in seconds
+    objects: list[ObservedObject] = Field(default_factory=list)
+    evidence: list[EvidenceItem] = Field(default_factory=list)
+    transcript: Optional[str] = None  # Audio transcript if available
+    context: dict = Field(default_factory=dict)  # Additional metadata
+
+
+class ObservationResponse(BaseModel):
+    """Acknowledgment that evidence was received and logged."""
+    received: bool = True
+    event_id: str
+    message: str = "Evidence logged successfully"
+
+
 # ============================================================================
 # API Endpoints
 # ============================================================================
@@ -366,6 +401,47 @@ async def get_scene_summary(camera_id: int):
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get scene summary: {str(e)}")
+
+
+@app.post("/evidence", response_model=ObservationResponse)
+async def receive_evidence(request: ObservationRequest):
+    """
+    Receive observations and evidence from edge device.
+    
+    Edge devices act as sensors - they observe the world and report facts.
+    This endpoint receives those facts and stores them for policy decisions.
+    
+    The Policy API will:
+    1. Store the evidence
+    2. Classify intent from accumulated evidence (future)
+    3. Make decisions about actions to take (future)
+    4. Trigger alerts, LLM integration, etc. (future)
+    
+    The edge device doesn't need to know what the policy decides.
+    """
+    try:
+        with get_db() as conn:
+            # TODO: Store evidence in database
+            # For now, just acknowledge receipt
+            # Future: persist to evidence_log table, classify intent, make policy decisions
+            
+            print(f"[EVIDENCE] Received from camera {request.camera_id}, event {request.event_id}")
+            print(f"  Objects: {len(request.objects)}")
+            print(f"  Evidence: {len(request.evidence)}")
+            if request.transcript:
+                print(f"  Transcript: {request.transcript}")
+            
+            # Log evidence items
+            for ev in request.evidence:
+                print(f"    - {ev.source}.{ev.feature} = {ev.value} (conf={ev.conf:.2f})")
+            
+            return ObservationResponse(
+                event_id=request.event_id,
+                message=f"Logged {len(request.evidence)} evidence items from camera {request.camera_id}"
+            )
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to log evidence: {str(e)}")
 
 
 if __name__ == "__main__":
