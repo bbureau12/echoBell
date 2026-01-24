@@ -112,6 +112,83 @@ def call_policy_api_for_scene_update(vision, event_id: str, camera_id: int, time
             raise
 
 
+def send_evidence_to_policy_api(vision, event_id: str, camera_id: int, timestamp: int, transcript: str = None):
+    """
+    Send observations and evidence to Policy API.
+    
+    Edge device acts as a sensor - reports what it sees/hears without making decisions.
+    The Policy API will classify intent and make policy decisions.
+    
+    Args:
+        vision: VisionResult with objects and evidence
+        event_id: Unique event identifier
+        camera_id: Camera/edge device identifier
+        timestamp: Unix timestamp in seconds
+        transcript: Optional audio transcript
+    """
+    try:
+        # Build objects payload
+        objects = []
+        for obj in vision.objects or []:
+            if obj.object_id is not None:
+                objects.append({
+                    "object_id": obj.object_id,
+                    "label": obj.label,
+                    "bbox": list(obj.box) if obj.box else [0, 0, 0, 0],
+                    "props": obj.props or {}
+                })
+        
+        # Build evidence payload
+        evidence = []
+        for ev in vision.evidence or []:
+            evidence.append({
+                "source": ev.source,
+                "feature": ev.feature,
+                "value": ev.value,
+                "conf": ev.conf,
+                "object_id": ev.object_id
+            })
+        
+        # Build request payload
+        payload = {
+            "camera_id": camera_id,
+            "event_id": event_id,
+            "timestamp": timestamp,
+            "objects": objects,
+            "evidence": evidence,
+            "context": {
+                "mode": MODE,
+                "person_present": vision.person_present,
+                "vehicle_present": vision.vehicle_present,
+                "package_box": vision.package_box
+            }
+        }
+        
+        # Add transcript if available
+        if transcript:
+            payload["transcript"] = transcript
+        
+        # Call Policy API
+        response = requests.post(
+            f"{POLICY_API_URL}/evidence",
+            json=payload,
+            timeout=API_TIMEOUT
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        print(f"[POLICY API] Evidence sent: {result['message']}")
+        return True
+        
+    except requests.RequestException as e:
+        print(f"[POLICY API] WARNING: Failed to send evidence to Policy API: {e}")
+        if config['fallback']['warn_only']:
+            print("[POLICY API] Continuing without policy decisions...")
+            return False
+        else:
+            raise
+
+
 def handle_ring():
     import sqlite3
     conn = sqlite3.connect(DB)
@@ -173,6 +250,17 @@ def handle_ring():
             (asr.text, event_id)
         )
         conn.commit()
+    
+    # SEND EVIDENCE TO POLICY API
+    # Now that we have complete observations (vision + scene + audio), send to policy layer
+    # Policy API will make decisions about what to do with this information
+    send_evidence_to_policy_api(
+        vision=vision,
+        event_id=event_id,
+        camera_id=CAMERA_ID,
+        timestamp=int(time.time()),
+        transcript=asr.text if asr.text else None
+    )
 
     # DECIDE - use the classified intent from classify_and_log
     ctx = {"intent": classified.intent, "mode": MODE, "vision": vision}
