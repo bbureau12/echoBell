@@ -54,7 +54,12 @@ class TelegramNotifier:
                     continue
                 r.raise_for_status()
                 return True
-            except Exception:
+            except Exception as e:
+                print(f"[Telegram] Attempt {attempt + 1}/3 failed: {e}")
+                if attempt == 2:  # Last attempt
+                    print(f"[Telegram] All attempts failed. URL: {url}")
+                    print(f"[Telegram] Status code: {getattr(r, 'status_code', 'N/A') if 'r' in locals() else 'N/A'}")
+                    print(f"[Telegram] Response: {getattr(r, 'text', 'N/A')[:200] if 'r' in locals() else 'N/A'}")
                 time.sleep(0.5 * (attempt + 1))
         return False
 

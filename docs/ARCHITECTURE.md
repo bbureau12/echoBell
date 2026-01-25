@@ -671,6 +671,8 @@ response = requests.post(
 
 **Key Class**: `ActionExecutor`
 
+Uses a **plugin-based action handler registry** for extensible action execution. Actions are dispatched to registered handlers via `ActionRegistry`.
+
 ```python
 executor = ActionExecutor(conn=conn)
 
@@ -689,13 +691,73 @@ results = await executor.execute_actions(
         "track_key": "plate_abc123"
     }
 )
+
+# List available actions
+print(executor.list_available_actions())
+# ['telegram', 'speak', 'webhook', 'log', ...]
 ```
 
 **Features**:
-- Variable substitution in messages (e.g., `{vehicle_color}`)
-- Alert history recording (prevents spam)
-- Error handling and retry logic
-- Async execution with httpx
+- **Plugin architecture**: Action handlers are independent classes
+- **Auto-discovery**: Handlers register via `@register_action_handler` decorator
+- **Extensible**: Add custom actions without modifying core code
+- **Variable substitution**: `{variable}` placeholders in messages/payloads
+- **Alert history**: Records to `alert_history` table for spam prevention
+- **Error handling**: Graceful degradation on action failures
+
+**Architecture**:
+```
+ActionExecutor → ActionRegistry.get_handler(type) → Handler.execute()
+```
+
+See [ACTION_HANDLERS.md](ACTION_HANDLERS.md) for creating custom action handlers.
+
+#### `action_handlers.py` - Action Handler Registry
+
+**Purpose**: Extensible plugin system for policy actions
+
+**Key Components**:
+
+1. **ActionHandler Protocol** - Interface all handlers must implement:
+```python
+class ActionHandler(Protocol):
+    def __init__(self, conn: sqlite3.Connection): ...
+    async def execute(self, action, variables, context) -> Dict[str, Any]: ...
+```
+
+2. **ActionRegistry** - Global registry mapping action types to handler classes:
+```python
+@register_action_handler("my_action")
+class MyActionHandler:
+    async def execute(self, action, variables, context):
+        return {"success": True, "action_type": "my_action"}
+```
+
+3. **Built-in Handlers**:
+   - `telegram` - Send Telegram message via Bot API
+   - `speak` - Text-to-speech announcement
+   - `webhook` - HTTP request (GET/POST/PUT) to external services
+   - `log` - Console logging (for debugging)
+
+4. **Helper Functions**:
+   - `substitute_variables(text, vars)` - Replace `{placeholders}`
+   - `record_alert_history(...)` - Log to `alert_history` table
+
+**Custom Handler Example**:
+```python
+from packages.policy.action_handlers import register_action_handler
+
+@register_action_handler("sms")
+class SMSActionHandler:
+    def __init__(self, conn):
+        self.conn = conn
+    
+    async def execute(self, action, variables, context):
+        # Send SMS via Twilio, etc.
+        return {"success": True, "action_type": "sms"}
+```
+
+See [ACTION_HANDLERS.md](ACTION_HANDLERS.md) for complete documentation and examples.
 
 #### `apply.py` - Integration Layer
 
@@ -1622,6 +1684,8 @@ Folder name becomes expected intent for validation.
 - [Demo Walkthrough](demo.md) - Quick feature demonstration
 - [Policy API Reference](POLICY_API.md) - REST API for dynamic policy management
 - [Policy Integration Summary](POLICY_INTEGRATION_SUMMARY.md) - Setup guide and examples
+- [Policy Reference](POLICY_REFERENCE.md) - Condition operators and policy syntax quick reference
+- [Action Handlers](ACTION_HANDLERS.md) - Creating custom action handlers (plugin system)
 - [ADR-00001](adr/ADR-00001-event-without-visitor.md) - Events without visitor identity
 - [ADR-00002](adr/ADR-00002-plate-privacy-hmac.md) - Plate privacy via HMAC
 - [ADR-00003](adr/ADR-00003-plates-as-events-not-identity.md) - Plate as evidence, not identity

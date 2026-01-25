@@ -435,9 +435,9 @@ async def receive_evidence(request: ObservationRequest):
     The Policy API will:
     1. Analyze object movement (position changes, exits, loitering)
     2. Store the evidence
-    3. Classify intent from accumulated evidence (future)
-    4. Make decisions about actions to take (future)
-    5. Trigger alerts, LLM integration, etc. (future)
+    3. Evaluate policies against evidence
+    4. Execute matched policy actions (telegram, speak, webhook, etc.)
+    5. Return results
     
     The edge device doesn't need to know what the policy decides.
     """
@@ -556,9 +556,68 @@ async def receive_evidence(request: ObservationRequest):
             for ev in movement_evidence:
                 print(f"    - {ev['source']}.{ev['feature']} = {ev['value']} (conf={ev['conf']:.2f})")
             
+            # Evaluate policies against evidence
+            policy_results = []
+            try:
+                from packages.policy.apply import evaluate_policies
+                
+                # Combine all evidence (convert movement evidence to Evidence objects)
+                all_evidence = [
+                    {
+                        'source': ev.source,
+                        'feature': ev.feature,
+                        'value': ev.value,
+                        'conf': ev.conf
+                    }
+                    for ev in request.evidence
+                ]
+                all_evidence.extend(movement_evidence)
+                
+                # Build context for policy evaluation
+                context = {
+                    'camera_id': request.camera_id,
+                    'event_id': request.event_id,
+                    'timestamp': request.timestamp
+                }
+                
+                # Add track context if available
+                if request.objects:
+                    first_obj = request.objects[0]
+                    track_key = first_obj.props.get('scene_track_key')
+                    if track_key:
+                        context['track_key'] = track_key
+                        context['track_type'] = first_obj.cls  # 'vehicle' or 'person'
+                        
+                        # Get track duration
+                        cursor = conn.execute("""
+                            SELECT first_seen_ts FROM scene_tracks
+                            WHERE camera_id = ? AND track_key = ?
+                        """, (request.camera_id, track_key))
+                        row = cursor.fetchone()
+                        if row:
+                            context['track_duration_seconds'] = request.timestamp - row[0]
+                
+                # Evaluate policies
+                policy_results = await evaluate_policies(
+                    evidence=all_evidence,
+                    context=context,
+                    conn=conn
+                )
+                
+                if policy_results:
+                    print(f"  [POLICY] Executed {len(policy_results)} actions:")
+                    for result in policy_results:
+                        status = "✓" if result.get('success') else "✗"
+                        print(f"    {status} {result.get('action_type')} - {result.get('policy_name', 'unknown')}")
+                
+            except Exception as e:
+                print(f"  [POLICY] Policy evaluation failed: {e}")
+                import traceback
+                traceback.print_exc()
+            
             return ObservationResponse(
                 event_id=request.event_id,
-                message=f"Logged {all_evidence_count} evidence items ({len(movement_evidence)} movement) from camera {request.camera_id}"
+                message=f"Logged {all_evidence_count} evidence items, executed {len(policy_results)} policy actions"
             )
             
     except Exception as e:

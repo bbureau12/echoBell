@@ -27,7 +27,8 @@ async def evaluate_policies(
     evidence: List[Dict[str, Any]],
     context: Dict[str, Any],
     conn: sqlite3.Connection,
-    policy_file: str = "config/policy_rules.yaml"
+    policy_file: str = "config/policy_rules.yaml",
+    use_database: bool = True
 ) -> List[Dict[str, Any]]:
     """
     Evaluate evidence against policy rules and execute actions.
@@ -36,12 +37,13 @@ async def evaluate_policies(
         evidence: List of evidence dicts {source, feature, value, conf}
         context: Additional context (camera_id, track_key, track_duration_seconds, etc.)
         conn: Database connection
-        policy_file: Path to policy YAML file
+        policy_file: Path to policy YAML file (used if use_database=False)
+        use_database: If True, load policies from database; if False, use YAML file
     
     Returns:
         List of executed actions with results
     """
-    evaluator = PolicyEvaluator(policy_file, conn)
+    evaluator = PolicyEvaluator(conn=conn, policy_file=policy_file, use_database=use_database)
     executor = ActionExecutor(conn)
     
     # Find matching policies

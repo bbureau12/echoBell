@@ -386,6 +386,28 @@ class PolicyEvaluator:
         """Resolve all variables from evidence and context"""
         resolved = {}
         
+        # First, auto-extract common variables from evidence
+        # This allows messages to use {vehicle_color}, {plate_text}, etc. automatically
+        for e in evidence:
+            source = e.get('source', '')
+            feature = e.get('feature', '')
+            value = e.get('value', '')
+            
+            # Create variable names like: vehicle_color, plate_text, intent, etc.
+            # Map common evidence features to variable names
+            if feature in ['color', 'vehicle_type', 'plate_text', 'intent', 'confidence', 'visitor_id']:
+                resolved[feature] = str(value)
+            
+            # Also create source_feature combo (e.g., vision_color, ocr_plate_text)
+            var_name = f"{source}_{feature}"
+            resolved[var_name] = str(value)
+        
+        # Add context variables (camera_id, track_key, etc.)
+        for key, value in context.items():
+            if isinstance(value, (str, int, float)):
+                resolved[key] = str(value)
+        
+        # Then apply explicit variable definitions from policy/config
         for var_name, var_def in self.variable_defs.items():
             # Evidence-based variables
             if 'source' in var_def:
