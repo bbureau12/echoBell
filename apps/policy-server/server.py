@@ -23,6 +23,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..
 sys.path.insert(0, PROJECT_ROOT)
 
 from packages.scene.scene_tracker import SceneTracker, build_observations_from_vision
+from packages.scene.movement_analyzer import MovementAnalyzer, MovementConfig, build_observed_objects
 from packages.common.types import VisionResult, SceneObject, Evidence
 from packages.common.config_models import RetentionSettings
 
@@ -58,11 +59,33 @@ if POLICY_ROUTER_AVAILABLE:
 DB_PATH = os.getenv("ECHOBELL_DB_PATH", os.path.join(PROJECT_ROOT, "data", "echoBell.db"))
 retention = RetentionSettings()
 
+# Load movement detection configuration
+import json
+CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.json")
+movement_config = MovementConfig()  # Default values
+if os.path.exists(CONFIG_PATH):
+    try:
+        with open(CONFIG_PATH, 'r') as f:
+            config_data = json.load(f)
+            if 'movement_detection' in config_data:
+                md_config = config_data['movement_detection']
+                movement_config = MovementConfig(
+                    significant_movement_px=md_config.get('significant_movement_px', 50.0),
+                    loitering_movement_px=md_config.get('loitering_movement_px', 20.0),
+                    loitering_time_s=md_config.get('loitering_time_s', 30)
+                )
+                print(f"[info] Movement detection config loaded: movement={movement_config.significant_movement_px}px, loitering={movement_config.loitering_movement_px}px/{movement_config.loitering_time_s}s")
+    except Exception as e:
+        print(f"[warning] Failed to load movement config from {CONFIG_PATH}: {e}")
+
 # Initialize SceneTracker (stateful, persists across requests)
 scene_tracker = SceneTracker(
     iou_match_threshold=0.30,
     grace_period_s=retention.scene_tracking_grace_period_s
 )
+
+# Initialize MovementAnalyzer
+movement_analyzer = MovementAnalyzer(movement_config)
 
 # Database connection context manager
 @contextmanager
@@ -443,108 +466,48 @@ async def receive_evidence(request: ObservationRequest):
     """
     try:
         with get_db() as conn:
-            # Analyze movement for objects with scene_track_keys
-            movement_evidence = []
+            # Convert API objects to business layer format
+            observed_objects = build_observed_objects(request.objects)
             
-            for obj in request.objects:
-                track_key = obj.props.get("scene_track_key")
-                if not track_key:
-                    continue
-                
-                # Get historical position from scene_tracks
-                cursor = conn.execute("""
-                    SELECT last_box_json, last_seen_ts, first_seen_ts
-                    FROM scene_tracks
-                    WHERE camera_id = ? AND track_key = ? AND active = 1
-                """, (request.camera_id, track_key))
-                
-                row = cursor.fetchone()
-                if not row:
-                    continue
-                
-                last_box_json, last_seen_ts, first_seen_ts = row
-                
-                # Parse previous bbox
-                if last_box_json:
-                    import json
-                    try:
-                        prev_bbox = json.loads(last_box_json)
-                        
-                        # Calculate movement distance
-                        curr_center_x = (obj.bbox[0] + obj.bbox[2]) / 2
-                        curr_center_y = (obj.bbox[1] + obj.bbox[3]) / 2
-                        prev_center_x = (prev_bbox[0] + prev_bbox[2]) / 2
-                        prev_center_y = (prev_bbox[1] + prev_bbox[3]) / 2
-                        
-                        dx = curr_center_x - prev_center_x
-                        dy = curr_center_y - prev_center_y
-                        distance = (dx**2 + dy**2)**0.5
-                        
-                        # Significant movement threshold (e.g., 50 pixels)
-                        if distance > 50:
-                            movement_evidence.append({
-                                "source": "movement",
-                                "feature": "position_changed",
-                                "value": f"{distance:.1f}px",
-                                "conf": 1.0,
-                                "object_id": obj.object_id
-                            })
-                        
-                        # Check for loitering (object stationary for extended time)
-                        time_in_scene = request.timestamp - first_seen_ts
-                        if distance < 20 and time_in_scene > 30:  # < 20px movement, > 30 seconds
-                            movement_evidence.append({
-                                "source": "movement",
-                                "feature": "loitering",
-                                "value": f"{time_in_scene}s",
-                                "conf": 1.0,
-                                "object_id": obj.object_id
-                            })
-                            
-                    except (json.JSONDecodeError, KeyError, TypeError):
-                        pass
+            # Analyze movement patterns using business layer
+            movement_evidence = movement_analyzer.analyze_movement(
+                conn=conn,
+                camera_id=request.camera_id,
+                current_objects=observed_objects,
+                timestamp=request.timestamp
+            )
             
-            # Check for objects that left (in scene_tracks but not in current observations)
-            # Get all active tracks for this camera
-            cursor = conn.execute("""
-                SELECT track_key, track_type, id
-                FROM scene_tracks
-                WHERE camera_id = ? AND active = 1
-            """, (request.camera_id,))
+            # Detect objects that have exited the scene
+            current_track_keys = {
+                obj.scene_track_key 
+                for obj in observed_objects 
+                if obj.scene_track_key
+            }
+            exit_evidence, inactive_track_ids = movement_analyzer.detect_exits(
+                conn=conn,
+                camera_id=request.camera_id,
+                current_track_keys=current_track_keys,
+                timestamp=request.timestamp
+            )
             
-            active_tracks = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+            # Mark exited tracks as inactive
+            movement_analyzer.mark_tracks_inactive(
+                conn=conn,
+                track_ids=inactive_track_ids,
+                timestamp=request.timestamp
+            )
             
-            # Get track_keys from current observations
-            current_track_keys = {obj.props.get("scene_track_key") for obj in request.objects if obj.props.get("scene_track_key")}
-            
-            # Find tracks that are no longer present
-            missing_track_keys = set(active_tracks.keys()) - current_track_keys
-            
-            for track_key in missing_track_keys:
-                track_type, track_id = active_tracks[track_key]
-                
-                # Generate exit evidence
-                movement_evidence.append({
-                    "source": "movement",
-                    "feature": f"{track_type}_exited",
-                    "value": track_key,
-                    "conf": 1.0,
-                    "object_id": None
-                })
-                
-                # Mark track as inactive in database
-                conn.execute("""
-                    UPDATE scene_tracks
-                    SET active = 0, last_seen_ts = ?
-                    WHERE id = ?
-                """, (request.timestamp, track_id))
+            # Combine all movement evidence
+            all_movement_evidence = movement_evidence + exit_evidence
+            # Combine all movement evidence
+            all_movement_evidence = movement_evidence + exit_evidence
             
             # Log all evidence (original + movement)
-            all_evidence_count = len(request.evidence) + len(movement_evidence)
+            all_evidence_count = len(request.evidence) + len(all_movement_evidence)
             
             print(f"[EVIDENCE] Received from camera {request.camera_id}, event {request.event_id}")
             print(f"  Objects: {len(request.objects)}")
-            print(f"  Evidence: {len(request.evidence)} original + {len(movement_evidence)} movement")
+            print(f"  Evidence: {len(request.evidence)} original + {len(all_movement_evidence)} movement")
             if request.transcript:
                 print(f"  Transcript: {request.transcript}")
             
@@ -553,7 +516,7 @@ async def receive_evidence(request: ObservationRequest):
                 print(f"    - {ev.source}.{ev.feature} = {ev.value} (conf={ev.conf:.2f})")
             
             # Log movement evidence
-            for ev in movement_evidence:
+            for ev in all_movement_evidence:
                 print(f"    - {ev['source']}.{ev['feature']} = {ev['value']} (conf={ev['conf']:.2f})")
             
             # Evaluate policies against evidence
@@ -571,7 +534,7 @@ async def receive_evidence(request: ObservationRequest):
                     }
                     for ev in request.evidence
                 ]
-                all_evidence.extend(movement_evidence)
+                all_evidence.extend(all_movement_evidence)
                 
                 # Build context for policy evaluation
                 context = {

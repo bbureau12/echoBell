@@ -13,6 +13,11 @@
     "evidence_cleanup_batch_size": 1000,
     "evidence_cleanup_enabled": true
   },
+  "movement_detection": {
+    "significant_movement_px": 50.0,
+    "loitering_movement_px": 20.0,
+    "loitering_time_s": 30
+  },
   "plate_modifiers": {
     "boost_standard_length": 0.35,
     "boost_acceptable_length": 0.20,
