@@ -8,8 +8,9 @@ This FastAPI service handles:
 - **Scene Tracking**: Temporal tracking of vehicles/people across cameras
 - **Entity Linkage**: Associate people with vehicles they arrived in
 - **Visit History**: Track repeat visitors and trusted vehicles
-- **Policy Decisions**: Centralized policy application (future)
-- **LLM Integration**: Contextual reasoning (future)
+- **Policy Decisions**: Centralized policy evaluation and management
+- **Scheduled Events**: Time-based policy behavior
+- **MCP Integration**: Model Context Protocol server for programmatic access
 
 ## Architecture
 
@@ -296,3 +297,65 @@ FastAPI/Uvicorn logs to stdout. Redirect to file:
 ```bash
 uvicorn server:app --log-config logging.yaml > policy_api.log 2>&1
 ```
+
+## MCP Server
+
+The Policy API includes an MCP (Model Context Protocol) server for programmatic access to:
+- Policy management (create, read, update, delete, evaluate)
+- Scene tracking queries (active tracks, visit history)
+- Scheduled events (create, query, active events)
+- Evidence inspection and debugging
+
+### Installation
+
+```powershell
+# Install MCP SDK
+pip install -r requirements-mcp.txt
+```
+
+### Configuration
+
+Add to your MCP client config (e.g., Claude Desktop):
+
+```json
+{
+  "mcpServers": {
+    "echobell": {
+      "command": "python",
+      "args": ["D:\\Projects\\echoBell\\echoBell\\apps\\policy-server\\mcp_server.py"],
+      "env": {
+        "ECHOBELL_DB": "D:\\Projects\\echoBell\\echoBell\\echoBell.db"
+      }
+    }
+  }
+}
+```
+
+### Documentation
+
+See [MCP Server Documentation](../../docs/MCP_SERVER.md) for:
+- Complete tool reference (14 tools)
+- Usage examples and workflows
+- Integration guide
+- Troubleshooting
+
+### Quick Start
+
+After configuration, use the MCP client to:
+
+```
+List all enabled policies
+```
+
+```
+Create a policy to greet visitors during Halloween
+```
+
+```
+Show me active scene tracks for camera 1
+```
+
+```
+What scheduled events are active right now?
+```
+

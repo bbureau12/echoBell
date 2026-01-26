@@ -1,0 +1,9 @@
+# MCP Server Requirements
+# Install with: pip install -r apps/policy-server/requirements-mcp.txt
+
+# Model Context Protocol SDK
+mcp>=0.9.0
+
+# Already installed in main environment:
+# - pydantic (for data validation)
+# - fastapi (for REST API)

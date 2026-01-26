@@ -190,6 +190,13 @@ class PolicyEvaluator:
         if 'day_of_week' in condition:
             return self._check_day_of_week(condition['day_of_week'])
         
+        # Scheduled event checks
+        if 'active_event' in condition:
+            return self._check_active_event(condition['active_event'], context)
+        
+        if 'no_active_event' in condition:
+            return not self._check_active_event(condition['no_active_event'], context)
+        
         # Future: delivery/appointment checks
         if 'no_expected_delivery' in condition:
             return True  # TODO: Implement delivery schedule check
@@ -380,6 +387,54 @@ class PolicyEvaluator:
         for day in spec:
             if days_map.get(day.lower()) == current_day:
                 return True
+        return False
+    
+    def _check_active_event(self, spec: Dict[str, Any], context: Dict) -> bool:
+        """
+        Check if there's an active scheduled event matching criteria.
+        
+        Args:
+            spec: Dict with optional 'policy_hint' to match specific event types
+            context: Dict with 'timestamp' (defaults to now)
+        
+        Returns:
+            True if matching active event exists
+        
+        Example conditions:
+            {"active_event": {"policy_hint": "greet_visitors"}}
+            {"active_event": {}}  # Any active event
+        """
+        policy_hint = spec.get('policy_hint')
+        timestamp = context.get('timestamp', int(datetime.now().timestamp()))
+        
+        # Query for active events
+        if policy_hint:
+            # Match specific policy_hint
+            cursor = self.conn.execute("""
+                SELECT id, name, policy_hint
+                FROM scheduled_event
+                WHERE ? BETWEEN start_ts AND end_ts
+                AND policy_hint = ?
+                LIMIT 1
+            """, (timestamp, policy_hint))
+        else:
+            # Any active event
+            cursor = self.conn.execute("""
+                SELECT id, name, policy_hint
+                FROM scheduled_event
+                WHERE ? BETWEEN start_ts AND end_ts
+                LIMIT 1
+            """, (timestamp,))
+        
+        active_event = cursor.fetchone()
+        
+        if active_event:
+            # Store active event info in context for debugging/logging
+            context['active_event_id'] = active_event[0]
+            context['active_event_name'] = active_event[1]
+            context['active_event_hint'] = active_event[2]
+            return True
+        
         return False
     
     def _resolve_variables(self, evidence: List[Dict], context: Dict) -> Dict[str, str]:

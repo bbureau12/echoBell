@@ -27,6 +27,10 @@ from packages.scene.movement_analyzer import MovementAnalyzer, MovementConfig, b
 from packages.common.types import VisionResult, SceneObject, Evidence
 from packages.common.config_models import RetentionSettings
 
+# Import service layer (DRY business logic)
+sys.path.insert(0, os.path.dirname(__file__))
+import services
+
 # Import policy management router
 # Note: Uses dynamic import to handle file naming with dash
 import importlib.util
@@ -95,6 +99,19 @@ def get_db():
     try:
         # Ensure schema exists
         scene_tracker.ensure_schema(conn)
+        # Ensure scheduled_event table exists
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS scheduled_event (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT,
+                start_ts INTEGER NOT NULL,
+                end_ts INTEGER NOT NULL,
+                policy_hint TEXT,
+                created_ts INTEGER NOT NULL,
+                updated_ts INTEGER NOT NULL
+            )
+        ''')
         yield conn
         conn.commit()
     except Exception as e:
@@ -587,6 +604,119 @@ async def receive_evidence(request: ObservationRequest):
         raise HTTPException(status_code=500, detail=f"Failed to log evidence: {str(e)}")
 
 
+# ============================================================================
+# Scheduled Event Endpoints (using service layer)
+# ============================================================================
+
+class ScheduledEventCreate(BaseModel):
+    name: str = Field(..., description="Event name", example="Halloween")
+    description: Optional[str] = Field("", description="Event description")
+    start_ts: int = Field(..., description="Start time (Unix timestamp)")
+    end_ts: int = Field(..., description="End time (Unix timestamp)")
+    policy_hint: Optional[str] = Field("", description="Optional policy hint (e.g. 'greet_visitors')")
+
+
+class ScheduledEventUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    start_ts: Optional[int] = None
+    end_ts: Optional[int] = None
+    policy_hint: Optional[str] = None
+
+
+class ScheduledEventResponse(BaseModel):
+    id: int
+    name: str
+    description: str
+    start_ts: int
+    end_ts: int
+    policy_hint: Optional[str]
+    created_ts: int
+    updated_ts: int
+
+
+@app.get("/scheduled_events", response_model=list[ScheduledEventResponse])
+async def list_scheduled_events():
+    """List all scheduled events (sorted by start time)."""
+    try:
+        with get_db() as conn:
+            events = services.list_scheduled_events(conn)
+            return [ScheduledEventResponse(**event) for event in events]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list scheduled events: {str(e)}")
+
+
+@app.post("/scheduled_events", response_model=ScheduledEventResponse, status_code=201)
+async def create_scheduled_event(event: ScheduledEventCreate):
+    """Create a new scheduled event."""
+    try:
+        with get_db() as conn:
+            created = services.create_scheduled_event(
+                conn=conn,
+                name=event.name,
+                start_ts=event.start_ts,
+                end_ts=event.end_ts,
+                description=event.description or "",
+                policy_hint=event.policy_hint or ""
+            )
+            return ScheduledEventResponse(**created)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create scheduled event: {str(e)}")
+
+
+@app.get("/scheduled_events/{event_id}", response_model=ScheduledEventResponse)
+async def get_scheduled_event(event_id: int):
+    """Get a scheduled event by ID."""
+    try:
+        with get_db() as conn:
+            event = services.get_scheduled_event(conn, event_id)
+            if not event:
+                raise HTTPException(status_code=404, detail="Scheduled event not found")
+            return ScheduledEventResponse(**event)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get scheduled event: {str(e)}")
+
+
+@app.patch("/scheduled_events/{event_id}", response_model=ScheduledEventResponse)
+async def update_scheduled_event(event_id: int, update: ScheduledEventUpdate):
+    """Update a scheduled event (partial update)."""
+    try:
+        with get_db() as conn:
+            updated = services.update_scheduled_event(
+                conn=conn,
+                event_id=event_id,
+                name=update.name,
+                description=update.description,
+                start_ts=update.start_ts,
+                end_ts=update.end_ts,
+                policy_hint=update.policy_hint
+            )
+            if not updated:
+                raise HTTPException(status_code=404, detail="Scheduled event not found")
+            return ScheduledEventResponse(**updated)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update scheduled event: {str(e)}")
+
+
+@app.delete("/scheduled_events/{event_id}", status_code=204)
+async def delete_scheduled_event(event_id: int):
+    """Delete a scheduled event by ID."""
+    try:
+        with get_db() as conn:
+            deleted = services.delete_scheduled_event(conn, event_id)
+            if not deleted:
+                raise HTTPException(status_code=404, detail="Scheduled event not found")
+            return
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete scheduled event: {str(e)}")
+
+
 if __name__ == "__main__":
     import uvicorn
     
@@ -598,3 +728,4 @@ if __name__ == "__main__":
     print(f"Database: {DB_PATH}")
     
     uvicorn.run(app, host=host, port=port)
+
