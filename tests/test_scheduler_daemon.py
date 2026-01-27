@@ -20,7 +20,7 @@ sys.path.insert(0, PROJECT_ROOT)
 import importlib.util
 spec = importlib.util.spec_from_file_location(
     "scheduler",
-    os.path.join(PROJECT_ROOT, "apps", "scheduler-daemon", "scheduler.py")
+    os.path.join(PROJECT_ROOT, "central", "scheduler", "scheduler.py")
 )
 scheduler_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(scheduler_module)

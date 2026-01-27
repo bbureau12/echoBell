@@ -38,11 +38,32 @@ def test_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             camera_id TEXT,
             track_key TEXT,
+            track_type TEXT,
             alert_type TEXT,
+            policy_id TEXT,
             priority TEXT,
             sent_ts INTEGER,
             message TEXT,
-            success INTEGER
+            success INTEGER,
+            error_message TEXT
+        )
+    """)
+    
+    conn.execute("""
+        CREATE TABLE policy_rules (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            description TEXT,
+            enabled INTEGER DEFAULT 1,
+            priority INTEGER DEFAULT 50,
+            conditions TEXT,
+            actions TEXT,
+            variables TEXT,
+            created_ts INTEGER,
+            updated_ts INTEGER,
+            created_by TEXT,
+            tags TEXT,
+            version INTEGER DEFAULT 1
         )
     """)
     
@@ -141,7 +162,7 @@ async def test_complete_loitering_escalation_flow(test_db, policy_file_with_esca
     }
     
     # Evaluate policies
-    results_initial = await evaluate_policies(evidence_initial, context_initial, test_db, policy_file_with_escalation)
+    results_initial = await evaluate_policies(evidence_initial, context_initial, test_db, policy_file_with_escalation, use_database=False)
     
     # Should trigger initial_loitering_alert (no prior alerts)
     assert len(results_initial) == 2  # telegram + speak
@@ -187,7 +208,7 @@ async def test_complete_loitering_escalation_flow(test_db, policy_file_with_esca
     }
     
     # Evaluate policies again
-    results_escalation = await evaluate_policies(evidence_escalation, context_escalation, test_db, policy_file_with_escalation)
+    results_escalation = await evaluate_policies(evidence_escalation, context_escalation, test_db, policy_file_with_escalation, use_database=False)
     
     # Should trigger loitering_escalation_with_lights (higher priority)
     # Note: Both policies match, but higher priority comes first
@@ -235,7 +256,7 @@ async def test_trusted_person_no_alert(test_db, policy_file_with_escalation):
         'track_duration_seconds': 300  # 5 minutes loitering
     }
     
-    results = await evaluate_policies(evidence, context, test_db, policy_file_with_escalation)
+    results = await evaluate_policies(evidence, context, test_db, policy_file_with_escalation, use_database=False)
     
     # Should NOT trigger any alerts (trusted person)
     assert len(results) == 0
@@ -259,7 +280,7 @@ async def test_movement_without_loitering_no_alert(test_db, policy_file_with_esc
         'track_duration_seconds': 200
     }
     
-    results = await evaluate_policies(evidence, context, test_db, policy_file_with_escalation)
+    results = await evaluate_policies(evidence, context, test_db, policy_file_with_escalation, use_database=False)
     
     # Should NOT trigger loitering policies (no loitering evidence)
     assert len(results) == 0
@@ -282,7 +303,7 @@ async def test_short_duration_no_alert(test_db, policy_file_with_escalation):
         'track_duration_seconds': 120  # Only 2 minutes
     }
     
-    results = await evaluate_policies(evidence, context, test_db, policy_file_with_escalation)
+    results = await evaluate_policies(evidence, context, test_db, policy_file_with_escalation, use_database=False)
     
     # Should NOT trigger (duration < 180 seconds)
     assert len(results) == 0

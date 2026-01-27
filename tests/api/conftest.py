@@ -19,6 +19,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from tests.helpers.db_setup import create_test_schema, create_test_cameras
+import json
 
 
 @pytest.fixture
@@ -36,11 +37,60 @@ def test_db(tmp_path):
         {'id': 2, 'name': 'Test Camera 2', 'capability_level_id': 1, 'stream_url': 'rtsp://test2'},
     ])
     
+    # Insert test policies for movement detection
+    _insert_movement_policies(conn)
+    
     conn.commit()
     
     yield str(db_path), conn
     
     conn.close()
+
+
+def _insert_movement_policies(conn):
+    """Insert movement detection policies into the database."""
+    import time
+    
+    policies = [
+        {
+            'id': 'movement_detection',
+            'name': 'Movement Detection Alert',
+            'description': 'Alert on significant movement or position changes',
+            'enabled': 1,
+            'priority': 50,
+            'conditions_json': json.dumps({
+                'any': [
+                    {'evidence_exists': {'source': 'movement', 'feature': 'position_changed'}},
+                    {'evidence_exists': {'source': 'movement', 'feature': 'object_exited'}},
+                    {'evidence_exists': {'source': 'movement', 'feature': 'loitering'}}
+                ]
+            }),
+            'actions_json': json.dumps([
+                {'type': 'telegram', 'message': 'Movement detected', 'priority': 'normal'}
+            ]),
+            'variables_json': json.dumps({}),
+            'created_ts': int(time.time()),
+            'updated_ts': int(time.time()),
+            'created_by': 'test_setup',
+            'tags': 'movement,test',
+            'version': 1
+        }
+    ]
+    
+    for policy in policies:
+        conn.execute("""
+            INSERT INTO policy_rules 
+            (id, name, description, enabled, priority, conditions_json, actions_json, 
+             variables_json, created_ts, updated_ts, created_by, tags, version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            policy['id'], policy['name'], policy['description'], policy['enabled'],
+            policy['priority'], policy['conditions_json'], policy['actions_json'],
+            policy['variables_json'], policy['created_ts'], policy['updated_ts'],
+            policy['created_by'], policy['tags'], policy['version']
+        ))
+    
+    conn.commit()
 
 
 @pytest.fixture
@@ -60,7 +110,7 @@ def api_client(test_db, monkeypatch):
     # Note: Can't use 'from apps.policy_server' due to hyphen in directory name
     import sys
     import importlib.util
-    server_path = PROJECT_ROOT / "apps" / "policy-server" / "server.py"
+    server_path = PROJECT_ROOT / "central" / "policy-server" / "server.py"
     spec = importlib.util.spec_from_file_location("policy_server", server_path)
     server = importlib.util.module_from_spec(spec)
     sys.modules["policy_server"] = server

@@ -21,11 +21,14 @@ def test_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             camera_id TEXT,
             track_key TEXT,
+            track_type TEXT,
             alert_type TEXT,
+            policy_id TEXT,
             priority TEXT,
             sent_ts INTEGER,
             message TEXT,
-            success INTEGER
+            success INTEGER,
+            error_message TEXT
         )
     """)
     
@@ -215,7 +218,7 @@ async def test_unknown_action_type(test_db):
     assert len(results) == 1
     assert results[0]['action_type'] == 'unknown_action_type'
     assert results[0]['success'] is False
-    assert 'Unknown action type' in results[0]['error']
+    assert 'No handler registered' in results[0]['error'] or 'Unknown action type' in results[0]['error']
 
 
 @pytest.mark.asyncio

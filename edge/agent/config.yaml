@@ -1,0 +1,60 @@
+# EchoBell Edge Agent Configuration
+
+agent:
+  # Unique camera/edge device identifier
+  camera_id: 1
+  
+  # Operating mode: WORKING, AWAY, VACATION, NIGHT
+  mode: WORKING
+  
+  # Device capabilities
+  has_button: false      # true for doorbell, false for passive camera
+  has_speaker: false     # true if device has speaker/TTS capability
+  has_microphone: false  # true if device has microphone/ASR capability
+
+camera:
+  # Camera source (RTSP URL or image path for testing)
+  rtsp_url: rtsp://camera:554/stream
+  
+  # Polling interval for passive monitoring (seconds)
+  poll_interval: 1.0
+  
+  # Persistence threshold - object must be in frame for N seconds before alerting
+  persistence_threshold: 3.0
+
+image_server:
+  # Enable HTTP server for serving images
+  enabled: true
+  
+  # HTTP port for image server
+  port: 8080
+  
+  # Directory to save images
+  directory: /var/echoBell/images
+  
+  # Auto-cleanup old images
+  cleanup_enabled: true
+  cleanup_hours: 24  # Delete images older than N hours
+
+policy_api:
+  # Policy server base URL
+  base_url: http://localhost:8000
+  
+  # API timeout in seconds
+  timeout: 5
+  
+  # Retry configuration
+  max_retries: 3
+  retry_delay: 1  # seconds
+
+database:
+  # Local database path
+  path: data/doorbell.db
+
+fallback:
+  # If true, continue operating even if Policy API is unreachable
+  # If false, fail hard when Policy API is down
+  warn_only: true
+
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR

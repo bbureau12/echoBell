@@ -87,7 +87,7 @@ def simple_policy_yaml(tmp_path):
 
 def test_evidence_exists_condition(test_db, simple_policy_yaml):
     """Test evidence_exists condition"""
-    evaluator = PolicyEvaluator(simple_policy_yaml, test_db)
+    evaluator = PolicyEvaluator(test_db, simple_policy_yaml, use_database=False)
     
     evidence = [
         {'source': 'alpr', 'feature': 'plate_hmac', 'value': 'unknown_plate', 'conf': 0.95}
@@ -103,7 +103,7 @@ def test_evidence_exists_condition(test_db, simple_policy_yaml):
 
 def test_trust_check_trusted_plate(test_db, simple_policy_yaml):
     """Test trust check with trusted plate (should NOT match unknown_vehicle policy)"""
-    evaluator = PolicyEvaluator(simple_policy_yaml, test_db)
+    evaluator = PolicyEvaluator(test_db, simple_policy_yaml, use_database=False)
     
     evidence = [
         {'source': 'alpr', 'feature': 'plate_hmac', 'value': 'plate_abc123', 'conf': 0.95}
@@ -141,7 +141,7 @@ def test_boolean_all_operator(test_db, tmp_path):
     with open(policy_file, 'w') as f:
         yaml.dump(policy_config, f)
     
-    evaluator = PolicyEvaluator(str(policy_file), test_db)
+    evaluator = PolicyEvaluator(test_db, str(policy_file), use_database=False)
     
     # Both conditions present - should match
     evidence = [
@@ -184,7 +184,7 @@ def test_boolean_any_operator(test_db, tmp_path):
     with open(policy_file, 'w') as f:
         yaml.dump(policy_config, f)
     
-    evaluator = PolicyEvaluator(str(policy_file), test_db)
+    evaluator = PolicyEvaluator(test_db, str(policy_file), use_database=False)
     
     # First condition only - should match
     evidence = [{'source': 'alpr', 'feature': 'plate_hmac', 'value': 'plate123', 'conf': 0.9}]
@@ -224,7 +224,7 @@ def test_boolean_not_operator(test_db, tmp_path):
     with open(policy_file, 'w') as f:
         yaml.dump(policy_config, f)
     
-    evaluator = PolicyEvaluator(str(policy_file), test_db)
+    evaluator = PolicyEvaluator(test_db, str(policy_file), use_database=False)
     
     # No plate evidence - should match
     evidence = [{'source': 'movement', 'feature': 'loitering', 'value': 'true', 'conf': 1.0}]
@@ -262,7 +262,7 @@ def test_track_duration_gt(test_db, tmp_path):
     with open(policy_file, 'w') as f:
         yaml.dump(policy_config, f)
     
-    evaluator = PolicyEvaluator(str(policy_file), test_db)
+    evaluator = PolicyEvaluator(test_db, str(policy_file), use_database=False)
     
     evidence = [{'source': 'movement', 'feature': 'loitering', 'value': 'true', 'conf': 1.0}]
     
@@ -302,7 +302,7 @@ def test_no_recent_alert(test_db, tmp_path):
     with open(policy_file, 'w') as f:
         yaml.dump(policy_config, f)
     
-    evaluator = PolicyEvaluator(str(policy_file), test_db)
+    evaluator = PolicyEvaluator(test_db, str(policy_file), use_database=False)
     
     evidence = [{'source': 'alpr', 'feature': 'plate_hmac', 'value': 'plate123', 'conf': 0.9}]
     context = {'track_key': 'track_003', 'camera_id': 'cam1'}
@@ -350,7 +350,7 @@ def test_alert_sent_within(test_db, tmp_path):
     with open(policy_file, 'w') as f:
         yaml.dump(policy_config, f)
     
-    evaluator = PolicyEvaluator(str(policy_file), test_db)
+    evaluator = PolicyEvaluator(test_db, str(policy_file), use_database=False)
     
     evidence = [{'source': 'movement', 'feature': 'loitering', 'value': 'true', 'conf': 1.0}]
     context = {'track_key': 'track_004', 'camera_id': 'cam1'}
@@ -399,7 +399,7 @@ def test_evidence_value_contains(test_db, tmp_path):
     with open(policy_file, 'w') as f:
         yaml.dump(policy_config, f)
     
-    evaluator = PolicyEvaluator(str(policy_file), test_db)
+    evaluator = PolicyEvaluator(test_db, str(policy_file), use_database=False)
     
     # Label contains "delivery" - should match
     evidence = [{'source': 'alpr', 'feature': 'plate_label', 'value': 'UPS Delivery Truck', 'conf': 0.9}]
@@ -438,7 +438,7 @@ def test_evidence_value_gt(test_db, tmp_path):
     with open(policy_file, 'w') as f:
         yaml.dump(policy_config, f)
     
-    evaluator = PolicyEvaluator(str(policy_file), test_db)
+    evaluator = PolicyEvaluator(test_db, str(policy_file), use_database=False)
     
     # Value > 100 - should match
     evidence = [{'source': 'movement', 'feature': 'distance_px', 'value': '150.5px', 'conf': 1.0}]
@@ -476,7 +476,7 @@ def test_time_between(test_db, tmp_path):
     with open(policy_file, 'w') as f:
         yaml.dump(policy_config, f)
     
-    evaluator = PolicyEvaluator(str(policy_file), test_db)
+    evaluator = PolicyEvaluator(test_db, str(policy_file), use_database=False)
     
     # Note: This test will pass/fail depending on current time
     # In real tests, you'd mock datetime.now()
@@ -521,7 +521,7 @@ def test_policy_priority_ordering(test_db, tmp_path):
     with open(policy_file, 'w') as f:
         yaml.dump(policy_config, f)
     
-    evaluator = PolicyEvaluator(str(policy_file), test_db)
+    evaluator = PolicyEvaluator(test_db, str(policy_file), use_database=False)
     
     evidence = [{'source': 'alpr', 'feature': 'plate_hmac', 'value': 'plate123', 'conf': 0.9}]
     matches = evaluator.evaluate_all(evidence, {})
@@ -555,7 +555,7 @@ def test_disabled_policy_not_evaluated(test_db, tmp_path):
     with open(policy_file, 'w') as f:
         yaml.dump(policy_config, f)
     
-    evaluator = PolicyEvaluator(str(policy_file), test_db)
+    evaluator = PolicyEvaluator(test_db, str(policy_file), use_database=False)
     
     evidence = [{'source': 'alpr', 'feature': 'plate_hmac', 'value': 'plate123', 'conf': 0.9}]
     matches = evaluator.evaluate_all(evidence, {})
@@ -589,7 +589,7 @@ def test_variable_resolution_from_evidence(test_db, tmp_path):
     with open(policy_file, 'w') as f:
         yaml.dump(policy_config, f)
     
-    evaluator = PolicyEvaluator(str(policy_file), test_db)
+    evaluator = PolicyEvaluator(test_db, str(policy_file), use_database=False)
     
     evidence = [{'source': 'alpr', 'feature': 'plate_hmac', 'value': 'ABC123', 'conf': 0.9}]
     matches = evaluator.evaluate_all(evidence, {})
@@ -622,7 +622,7 @@ def test_variable_resolution_from_context(test_db, tmp_path):
     with open(policy_file, 'w') as f:
         yaml.dump(policy_config, f)
     
-    evaluator = PolicyEvaluator(str(policy_file), test_db)
+    evaluator = PolicyEvaluator(test_db, str(policy_file), use_database=False)
     
     evidence = [{'source': 'alpr', 'feature': 'plate_hmac', 'value': 'ABC123', 'conf': 0.9}]
     context = {'camera_id': 'front_door_cam'}

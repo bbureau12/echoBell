@@ -178,6 +178,38 @@ def create_test_schema(conn: sqlite3.Connection, include_facial_recognition: boo
         enabled INTEGER DEFAULT 1
     """)
     
+    # Policy rules (dynamic policy management)
+    _create_table(conn, "policy_rules", """
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        description TEXT,
+        enabled INTEGER DEFAULT 1,
+        priority INTEGER DEFAULT 50,
+        conditions_json TEXT,
+        actions_json TEXT,
+        variables_json TEXT,
+        created_ts INTEGER,
+        updated_ts INTEGER,
+        created_by TEXT,
+        tags TEXT,
+        version INTEGER DEFAULT 1
+    """)
+    
+    # Alert history (for tracking sent alerts)
+    _create_table(conn, "alert_history", """
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        camera_id TEXT,
+        track_key TEXT,
+        track_type TEXT,
+        alert_type TEXT,
+        policy_id TEXT,
+        priority TEXT,
+        sent_ts INTEGER,
+        message TEXT,
+        success INTEGER,
+        error_message TEXT
+    """)
+    
     # Optional facial recognition tables
     if include_facial_recognition:
         # Known visitors

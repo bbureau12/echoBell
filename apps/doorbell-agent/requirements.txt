@@ -1,7 +1,0 @@
-# Edge Agent Dependencies
-
-# HTTP client for Policy API
-requests==2.31.0
-
-# Configuration parsing
-PyYAML==6.0.1

@@ -566,7 +566,7 @@ async def receive_evidence(request: ObservationRequest):
                     track_key = first_obj.props.get('scene_track_key')
                     if track_key:
                         context['track_key'] = track_key
-                        context['track_type'] = first_obj.cls  # 'vehicle' or 'person'
+                        context['track_type'] = first_obj.label  # 'vehicle' or 'person'
                         
                         # Get track duration
                         cursor = conn.execute("""

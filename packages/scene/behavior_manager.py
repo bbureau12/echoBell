@@ -1,9 +1,17 @@
 import time
 import sqlite3
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
-from apps.orchestrator.event import Event  # your existing Event
+
+@dataclass
+class Event:
+    """Simple event dataclass for behavior manager"""
+    source: str
+    type: str
+    kind: str
+    snapshot: str
+    payload: Dict[str, Any] = None
 
 
 @dataclass
