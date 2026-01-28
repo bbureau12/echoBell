@@ -12,6 +12,7 @@ import sqlite3
 import importlib.util
 from pathlib import Path
 from fastapi.testclient import TestClient
+from unittest.mock import patch
 import sys
 
 # Add project root to path
@@ -20,6 +21,16 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from tests.helpers.db_setup import create_test_schema, create_test_cameras
 import json
+
+
+@pytest.fixture(autouse=True)
+def mock_telegram(monkeypatch):
+    """Mock telegram to prevent sending real messages in API tests"""
+    def mock_send_message(self, message):
+        return True
+    
+    from packages.integrations import telegram
+    monkeypatch.setattr(telegram.TelegramNotifier, 'send_message', mock_send_message)
 
 
 @pytest.fixture

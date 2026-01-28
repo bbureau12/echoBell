@@ -6,9 +6,20 @@ import pytest
 import sqlite3
 import yaml
 from datetime import datetime
+from unittest.mock import patch
 from packages.policy.evaluator import PolicyEvaluator
 from packages.policy.executor import ActionExecutor
 from packages.policy.apply import evaluate_policies
+
+
+@pytest.fixture(autouse=True)
+def mock_telegram(monkeypatch):
+    """Mock telegram to prevent sending real messages in integration tests"""
+    def mock_send_message(self, message):
+        return True
+    
+    from packages.integrations import telegram
+    monkeypatch.setattr(telegram.TelegramNotifier, 'send_message', mock_send_message)
 
 
 @pytest.fixture

@@ -133,7 +133,7 @@ def test_db(tmp_path):
         migration_files = sorted(migrations_dir.glob("*.sql"))
         for migration_file in migration_files:
             print(f"Applying migration: {migration_file.name}")
-            with open(migration_file) as f:
+            with open(migration_file, encoding='utf-8') as f:
                 try:
                     conn.executescript(f.read())
                 except sqlite3.Error as e:

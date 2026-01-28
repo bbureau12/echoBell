@@ -15,6 +15,17 @@ import sqlite3
 import os
 import time
 from datetime import datetime, timedelta
+from unittest.mock import patch
+
+
+@pytest.fixture(autouse=True)
+def mock_telegram(monkeypatch):
+    """Mock telegram to prevent sending real messages in scheduled event tests"""
+    def mock_send_message(self, message):
+        return True
+    
+    from packages.integrations import telegram
+    monkeypatch.setattr(telegram.TelegramNotifier, 'send_message', mock_send_message)
 
 
 @pytest.fixture

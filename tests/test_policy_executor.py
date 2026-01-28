@@ -5,6 +5,7 @@ import pytest
 import pytest_asyncio
 import sqlite3
 from datetime import datetime
+from unittest.mock import patch, MagicMock
 from packages.policy.executor import ActionExecutor
 
 # Configure pytest-asyncio
@@ -38,8 +39,15 @@ def test_db():
 
 
 @pytest.mark.asyncio
-async def test_telegram_action_execution(test_db):
-    """Test telegram action execution and alert_history recording"""
+async def test_telegram_action_execution(test_db, monkeypatch):
+    """Test telegram action execution and alert_history recording (mocked)"""
+    # Mock the telegram send to avoid actually sending messages
+    def mock_send_message(self, message):
+        return True
+    
+    from packages.integrations import telegram
+    monkeypatch.setattr(telegram.TelegramNotifier, 'send_message', mock_send_message)
+    
     executor = ActionExecutor(test_db)
     
     actions = [
@@ -111,8 +119,14 @@ async def test_speak_action_execution(test_db):
 
 
 @pytest.mark.asyncio
-async def test_multiple_actions_execution(test_db):
+async def test_multiple_actions_execution(test_db, monkeypatch):
     """Test executing multiple actions in sequence"""
+    # Mock telegram
+    def mock_send_message(self, message):
+        return True
+    from packages.integrations import telegram
+    monkeypatch.setattr(telegram.TelegramNotifier, 'send_message', mock_send_message)
+    
     executor = ActionExecutor(test_db)
     
     actions = [
@@ -144,8 +158,14 @@ async def test_multiple_actions_execution(test_db):
 
 
 @pytest.mark.asyncio
-async def test_variable_substitution_in_message(test_db):
+async def test_variable_substitution_in_message(test_db, monkeypatch):
     """Test variable substitution in action messages"""
+    # Mock telegram
+    def mock_send_message(self, message):
+        return True
+    from packages.integrations import telegram
+    monkeypatch.setattr(telegram.TelegramNotifier, 'send_message', mock_send_message)
+    
     executor = ActionExecutor(test_db)
     
     actions = [
@@ -173,8 +193,15 @@ async def test_variable_substitution_in_message(test_db):
 
 
 @pytest.mark.asyncio
-async def test_telegram_without_context(test_db):
-    """Test telegram action when context is incomplete (no track_key)"""
+async def test_telegram_without_context(test_db, monkeypatch):
+    """Test telegram action when context is incomplete (no track_key) - mocked"""
+    # Mock the telegram send to avoid actually sending messages
+    def mock_send_message(self, message):
+        return True
+    
+    from packages.integrations import telegram
+    monkeypatch.setattr(telegram.TelegramNotifier, 'send_message', mock_send_message)
+    
     executor = ActionExecutor(test_db)
     
     actions = [
@@ -222,8 +249,14 @@ async def test_unknown_action_type(test_db):
 
 
 @pytest.mark.asyncio
-async def test_variable_substitution_missing_variable(test_db):
+async def test_variable_substitution_missing_variable(test_db, monkeypatch):
     """Test variable substitution when variable is missing"""
+    # Mock telegram
+    def mock_send_message(self, message):
+        return True
+    from packages.integrations import telegram
+    monkeypatch.setattr(telegram.TelegramNotifier, 'send_message', mock_send_message)
+    
     executor = ActionExecutor(test_db)
     
     actions = [
