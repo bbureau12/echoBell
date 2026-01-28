@@ -158,6 +158,20 @@ for result in results:
     max_seconds: 600
   ```
 
+### Camera Conditions
+
+- **`camera_id_eq`**: Match specific camera
+  ```yaml
+  camera_id_eq: main_door  # Only trigger on main_door camera
+  ```
+
+- **`camera_id_in`**: Match multiple cameras
+  ```yaml
+  camera_id_in: [front_left, front_right, main_door]  # Any front cameras
+  ```
+
+> **Use Case**: Create camera-specific responses (e.g., "Happy Halloween!" at main door, different alerts for garage vs front door). See [Camera-Specific Policies Guide](CAMERA_SPECIFIC_POLICIES.md) for detailed examples.
+
 ## Boolean Logic
 
 ### AND Logic (`all`)

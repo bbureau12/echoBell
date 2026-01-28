@@ -83,6 +83,12 @@ Welcome to the EchoBell documentation! This index will help you find what you ne
   - Enable/disable policies
   - API reference
 
+- **[CAMERA_SPECIFIC_POLICIES.md](CAMERA_SPECIFIC_POLICIES.md)** - Camera-specific policies
+  - Trigger policies based on camera ID
+  - Different responses per camera
+  - Multi-camera grouping
+  - Seasonal/scheduled camera policies
+
 ### Action Handlers
 
 - **[guides/ACTION_HANDLERS_GUIDE.md](guides/ACTION_HANDLERS_GUIDE.md)** - Complete action handler guide

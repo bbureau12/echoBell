@@ -147,6 +147,64 @@ track_duration_gt:
 
 ---
 
+#### `camera_id_eq`
+Match exactly one specific camera.
+
+```yaml
+camera_id_eq: main_door
+```
+
+**Context Required**: `camera_id` in context dict
+
+**Use Case**: Camera-specific greetings or alerts
+
+**Example**:
+```yaml
+conditions:
+  all:
+    - evidence_exists:
+        source: vision
+        feature: person_present
+    - camera_id_eq: main_door
+actions:
+  - type: speak
+    text: "Welcome to the main entrance!"
+```
+
+---
+
+#### `camera_id_in`
+Match any camera from a list.
+
+```yaml
+camera_id_in:
+  - front_door
+  - main_door
+  - driveway
+```
+
+**Context Required**: `camera_id` in context dict
+
+**Use Case**: Group multiple cameras for same behavior
+
+**Example**:
+```yaml
+conditions:
+  all:
+    - evidence_exists:
+        source: vision
+        feature: person_present
+    - camera_id_in:
+        - front_door
+        - main_door
+        - porch
+actions:
+  - type: speak
+    text: "Welcome to the front entrance!"
+```
+
+---
+
 #### `time_between`
 Current time within specified window.
 
@@ -603,8 +661,87 @@ service.toggle_policy("test_policy", enabled=True)
 
 ---
 
+## Complete Examples
+
+### Camera-Specific Halloween Greeting
+
+Different behavior per camera on Halloween night:
+
+```yaml
+policies:
+  # High priority - Main door Halloween greeting
+  - id: halloween_main_door
+    name: Halloween Main Door Greeting
+    description: Greet trick-or-treaters at main entrance
+    enabled: true
+    priority: 90
+    conditions:
+      all:
+        - evidence_exists:
+            source: vision
+            feature: person_present
+        - camera_id_eq: main_door
+        - active_event:
+            policy_hint: halloween_event
+        - time_between:
+            start: "17:00"
+            end: "21:00"
+    actions:
+      - type: speak
+        text: "Happy Halloween! What a great costume!"
+  
+  # Medium priority - Normal alert for side door (even on Halloween)
+  - id: side_door_alert
+    name: Side Door Alert
+    description: Alert for unexpected entry point
+    enabled: true
+    priority: 60
+    conditions:
+      all:
+        - evidence_exists:
+            source: vision
+            feature: person_present
+        - camera_id_eq: side_door
+    actions:
+      - type: telegram
+        message: "⚠️ Person at side door (unusual entry point)"
+        priority: urgent
+```
+
+### Multi-Camera Front Entrance Group
+
+Same greeting for all front-facing cameras:
+
+```yaml
+policies:
+  - id: front_entrance_greeting
+    name: Front Entrance Greeting
+    description: Welcome visitors at any front camera
+    enabled: true
+    priority: 70
+    conditions:
+      all:
+        - evidence_exists:
+            source: vision
+            feature: person_present
+        - camera_id_in:
+            - front_door
+            - main_door
+            - driveway
+            - porch
+        - time_between:
+            start: "08:00"
+            end: "20:00"
+    actions:
+      - type: speak
+        text: "Welcome! How can I help you today?"
+```
+
+---
+
 ## See Also
 
 - [POLICY_API.md](POLICY_API.md) - REST API reference
 - [POLICY_INTEGRATION_SUMMARY.md](POLICY_INTEGRATION_SUMMARY.md) - Setup guide
+- [CAMERA_SPECIFIC_POLICIES.md](CAMERA_SPECIFIC_POLICIES.md) - Camera-specific examples
 - [ARCHITECTURE.md](ARCHITECTURE.md) - System architecture
