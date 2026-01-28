@@ -167,6 +167,15 @@ class PolicyEvaluator:
         if 'trust_check' in condition:
             return self._check_trust(condition['trust_check'], evidence, context)
         
+        # Camera ID checks
+        if 'camera_id_eq' in condition:
+            camera_id = context.get('camera_id')
+            return camera_id == condition['camera_id_eq']
+        
+        if 'camera_id_in' in condition:
+            camera_id = context.get('camera_id')
+            return camera_id in condition['camera_id_in']
+        
         # Track duration checks
         if 'track_duration_gt' in condition:
             duration = context.get('track_duration_seconds', 0)
