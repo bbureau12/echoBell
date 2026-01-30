@@ -336,6 +336,18 @@ def snapshot_and_detect(
         if not positive_classes:
             positive_classes = POSITIVE_CLASSES
 
+        # 2.5) Load camera shutters (ignore regions) if camera_id provided
+        shutters = []
+        if camera_id is not None:
+            try:
+                from packages.data.shutter_service import ShutterService
+                shutters = ShutterService.get_shutters(conn, int(camera_id), enabled_only=True)
+                if debug and shutters:
+                    print(f"\n[SHUTTERS] Loaded {len(shutters)} ignore regions for camera {camera_id}")
+            except Exception as e:
+                if debug:
+                    print(f"[SHUTTERS] Warning: Could not load shutters: {e}")
+
         # Debug raw detections
         if debug:
             print("\n[YOLO RAW DETECTIONS]")
@@ -396,6 +408,16 @@ def snapshot_and_detect(
                 )
             )
             labels_for_flags.append(mapped)
+
+        # 3.5) Filter detections using shutters (ignore regions)
+        if shutters:
+            from packages.data.shutter_service import ShutterService
+            original_count = len(dets)
+            dets = ShutterService.filter_detections(dets, shutters, w, h, threshold=0.5)
+            filtered_count = original_count - len(dets)
+            if debug and filtered_count > 0:
+                print(f"[SHUTTERS] Filtered out {filtered_count} detections in ignore regions")
+
 
         flags = _derive_flags(labels_for_flags)
 

@@ -193,12 +193,15 @@ def snapshot_and_detect(
 **Responsibilities**:
 1. Load image from file or use provided array
 2. Run object detection (YOLOv8 via Ultralytics)
-3. Analyze vehicle colors (K-means clustering on crops)
-4. Run OCR on vehicle bounding boxes
-5. Process plate candidates with configurable boosting
-6. Run face recognition on person detections
-7. Establish parent-child relationships (person in vehicle)
-8. Return structured VisionResult with objects and evidence
+3. **Filter detections through camera shutters** (polygon-based ignore regions)
+4. Analyze vehicle colors (K-means clustering on crops)
+5. Run OCR on vehicle bounding boxes
+6. Process plate candidates with configurable boosting
+7. Run face recognition on person detections
+8. Establish parent-child relationships (person in vehicle)
+9. Return structured VisionResult with objects and evidence
+
+> **Camera Shutters**: Polygon-based ignore regions that filter out detections before processing. Used to eliminate false positives (sky, neighbors, TV screens), protect privacy, and optimize performance. See [ADR-008](adr/ADR-008-camera-shutters.md) and [tools/shutter/README.md](../tools/shutter/README.md).
 
 **Evidence Generated**:
 - `vision.vehicle_present = "true"` (conf: 0.9)
