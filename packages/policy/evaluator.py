@@ -199,6 +199,13 @@ class PolicyEvaluator:
         if 'day_of_week' in condition:
             return self._check_day_of_week(condition['day_of_week'])
         
+        # Quiet hours checks
+        if 'is_quiet_hours' in condition:
+            return self._check_is_quiet_hours(condition['is_quiet_hours'])
+        
+        if 'not_quiet_hours' in condition:
+            return not self._check_is_quiet_hours(condition['not_quiet_hours'])
+        
         # Scheduled event checks
         if 'active_event' in condition:
             return self._check_active_event(condition['active_event'], context)
@@ -397,6 +404,36 @@ class PolicyEvaluator:
             if days_map.get(day.lower()) == current_day:
                 return True
         return False
+    
+    def _check_is_quiet_hours(self, spec: Any = None) -> bool:
+        """
+        Check if current time falls within quiet hours
+        
+        Args:
+            spec: Optional - can be True (check any quiet hours) or 
+                  dict with 'name' to match specific quiet hour by name
+        
+        Returns:
+            True if currently in quiet hours
+        
+        Example conditions:
+            {"is_quiet_hours": true}
+            {"is_quiet_hours": {"name": "Sleep"}}
+        """
+        from packages.data.quiet_hours_service import QuietHoursService
+        
+        # If spec is just True or None, check if any quiet hours are active
+        if spec is True or spec is None or spec == {}:
+            return QuietHoursService.is_quiet_time(self.conn)
+        
+        # If spec has a name filter, check for specific quiet hour
+        if isinstance(spec, dict) and 'name' in spec:
+            name_filter = spec['name']
+            active_qh = QuietHoursService.get_active_quiet_hours(self.conn)
+            return any(qh.name == name_filter for qh in active_qh)
+        
+        # Default: check if any quiet hours are active
+        return QuietHoursService.is_quiet_time(self.conn)
     
     def _check_active_event(self, spec: Dict[str, Any], context: Dict) -> bool:
         """
