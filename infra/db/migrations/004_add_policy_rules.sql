@@ -75,4 +75,15 @@ VALUES
     '[{"type": "telegram", "message": "⚠️ Person loitering for {duration_minutes} minutes at night", "priority": "urgent"}, {"type": "speak", "text": "You are being recorded. Please leave the premises."}]',
     strftime('%s', 'now'),
     strftime('%s', 'now')
+),
+(
+    'voice_llm_fallback',
+    'Voice Command LLM Fallback',
+    'Route voice commands to LLM when no explicit policy matches',
+    1,
+    1,
+    '{"event_type": {"equals": "voice_command"}}',
+    '[{"type": "route_to_llm", "allowed_tools": ["query_scene", "get_active_tracks", "get_visit_history", "list_policies", "get_policy", "log_note", "active_events_now", "list_quiet_hours", "is_quiet_time"]}]',
+    strftime('%s', 'now'),
+    strftime('%s', 'now')
 );

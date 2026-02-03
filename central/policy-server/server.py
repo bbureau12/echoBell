@@ -47,6 +47,34 @@ try:
 except Exception as e:
     print(f"[warning] Policy management router not available: {e}")
 
+# Import voiceprint management router
+VOICEPRINT_ROUTER_AVAILABLE = False
+try:
+    voiceprint_router_path = os.path.join(os.path.dirname(__file__), "api_voiceprints.py")
+    if os.path.exists(voiceprint_router_path):
+        spec = importlib.util.spec_from_file_location("api_voiceprints", voiceprint_router_path)
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            voiceprint_router = module.router
+            VOICEPRINT_ROUTER_AVAILABLE = True
+except Exception as e:
+    print(f"[warning] Voiceprint management router not available: {e}")
+
+# Import voice command router
+VOICE_ROUTER_AVAILABLE = False
+try:
+    voice_router_path = os.path.join(os.path.dirname(__file__), "api_voice.py")
+    if os.path.exists(voice_router_path):
+        spec = importlib.util.spec_from_file_location("api_voice", voice_router_path)
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            voice_router = module.router
+            VOICE_ROUTER_AVAILABLE = True
+except Exception as e:
+    print(f"[warning] Voice command router not available: {e}")
+
 # Initialize FastAPI
 app = FastAPI(
     title="EchoBell Policy API",
@@ -54,14 +82,53 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Add middleware for correlation ID tracking
+try:
+    middleware_path = os.path.join(os.path.dirname(__file__), "middleware.py")
+    if os.path.exists(middleware_path):
+        spec = importlib.util.spec_from_file_location("middleware", middleware_path)
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            from middleware import CorrelationIDMiddleware
+            app.add_middleware(CorrelationIDMiddleware)
+            print("[info] Correlation ID middleware enabled")
+except Exception as e:
+    print(f"[warning] Middleware not available: {e}")
+
 # Include policy management router if available
 if POLICY_ROUTER_AVAILABLE:
     app.include_router(policy_router)
     print("[info] Policy management endpoints enabled at /policies/*")
 
+# Include voiceprint management router if available
+if VOICEPRINT_ROUTER_AVAILABLE:
+    app.include_router(voiceprint_router)
+    print("[info] Voiceprint management endpoints enabled at /voiceprints/*")
+
+# Include voice command router if available
+if VOICE_ROUTER_AVAILABLE:
+    app.include_router(voice_router)
+    print("[info] Voice command endpoints enabled at /voice/*")
+
+# Import Echonet service
+try:
+    from echonet_service import init_echonet_service, get_echonet_service
+    ECHONET_SERVICE_AVAILABLE = True
+except Exception as e:
+    ECHONET_SERVICE_AVAILABLE = False
+    print(f"[warning] Echonet service not available: {e}")
+
 # Configuration
 DB_PATH = os.getenv("ECHOBELL_DB_PATH", os.path.join(PROJECT_ROOT, "data", "echoBell.db"))
 retention = RetentionSettings()
+
+# Echonet configuration
+ECHONET_TARGET_NAME = os.getenv("ECHONET_TARGET_NAME", "echobell")
+ECHONET_API_KEY = os.getenv("ECHONET_API_KEY", "dontgiveitupluffy")
+POLICY_SERVER_BASE_URL = os.getenv("POLICY_SERVER_BASE_URL", "http://localhost:8000")
+ECHONET_WAKE_PHRASES = os.getenv("ECHONET_WAKE_PHRASES", "echobell").split(",")
+ECHONET_WAKE_PHRASES = [phrase.strip() for phrase in ECHONET_WAKE_PHRASES]  # Clean whitespace
 
 # Load movement detection configuration
 import json
@@ -207,9 +274,112 @@ class ObservationResponse(BaseModel):
 # API Endpoints
 # ============================================================================
 
+# Startup/Shutdown Events
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services on startup"""
+    if ECHONET_SERVICE_AVAILABLE:
+        try:
+            echonet_svc = init_echonet_service(
+                target_name=ECHONET_TARGET_NAME,
+                base_url=POLICY_SERVER_BASE_URL,
+                wake_phrases=ECHONET_WAKE_PHRASES,
+                api_key=ECHONET_API_KEY
+            )
+            echonet_svc.start_discovery()
+            print(f"[info] Echonet discovery started (target: {ECHONET_TARGET_NAME}, phrases: {', '.join(ECHONET_WAKE_PHRASES)})")
+        except Exception as e:
+            print(f"[error] Failed to start Echonet discovery: {e}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    if ECHONET_SERVICE_AVAILABLE:
+        echonet_svc = get_echonet_service()
+        if echonet_svc:
+            echonet_svc.stop_discovery()
+            print("[info] Echonet discovery stopped")
+
+
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint with Echonet registration status."""
+    health_data = {
+        "status": "healthy",
+        "database": DB_PATH,
+        "scene_tracker": {
+            "iou_threshold": scene_tracker.iou_match_threshold,
+            "grace_period_s": retention.scene_tracking_grace_period_s
+        }
+    }
+    
+    # Add Echonet status and perform health check
+    if ECHONET_SERVICE_AVAILABLE:
+        echonet_svc = get_echonet_service()
+        if echonet_svc:
+            # Perform health check and re-registration
+            echonet_health = await echonet_svc.health_check_and_reregister()
+            health_data["echonet"] = echonet_health
+        else:
+            health_data["echonet"] = {
+                "discovery_enabled": False,
+                "reason": "Service not initialized"
+            }
+    else:
+        health_data["echonet"] = {
+            "discovery_enabled": False,
+            "reason": "Echonet service not available"
+        }
+    
+    return health_data
+
+
+@app.get("/admin/echonet/status")
+async def echonet_status():
+    """Get detailed Echonet registration status"""
+    if not ECHONET_SERVICE_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Echonet service not available. Install zeroconf: pip install zeroconf"
+        )
+    
+    echonet_svc = get_echonet_service()
+    if not echonet_svc:
+        raise HTTPException(
+            status_code=503,
+            detail="Echonet service not initialized"
+        )
+    
+    return echonet_svc.get_status()
+
+
+@app.post("/admin/echonet/register")
+async def echonet_manual_register():
+    """Manually trigger Echonet registration for all discovered instances"""
+    if not ECHONET_SERVICE_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Echonet service not available. Install zeroconf: pip install zeroconf"
+        )
+    
+    echonet_svc = get_echonet_service()
+    if not echonet_svc:
+        raise HTTPException(
+            status_code=503,
+            detail="Echonet service not initialized"
+        )
+    
+    result = await echonet_svc.health_check_and_reregister()
+    return {
+        "message": "Registration attempted for all discovered instances",
+        "result": result
+    }
+
+
+@app.get("/health_old")
+async def health_check_old():
+    """Legacy health check endpoint (without Echonet)."""
     return {
         "status": "healthy",
         "database": DB_PATH,

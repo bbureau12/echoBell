@@ -26,3 +26,7 @@ became stable enough to warrant documentation.
 
 ### Policy & Access Control
 - **ADR-0008**: Trusted entity allowlists (plates, faces)
+
+### Voice & LLM Integration
+- **ADR-0015**: LLM-controlled voice listening mode for multi-turn conversations
+

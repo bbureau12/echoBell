@@ -1,8 +1,8 @@
 # EchoBell Architecture
 
-**Document Version**: 1.2  
-**Last Updated**: January 3, 2026  
-**Branch**: intent_tracking
+**Document Version**: 1.3  
+**Last Updated**: February 2, 2026  
+**Branch**: policylayer
 
 ---
 
@@ -16,6 +16,8 @@
 6. [Database Schema](#database-schema)
 7. [Configuration System](#configuration-system)
 8. [Integrations](#integrations)
+   - [Telegram Notifications](#telegram-notifications)
+   - [Voice Command Integration (Echonet)](#voice-command-integration-echonet)
 9. [Testing & Development](#testing--development)
 
 ---
@@ -27,9 +29,11 @@ EchoBell is a privacy-focused, multimodal doorbell intelligence system that:
 - **Detects and classifies** visitors using computer vision, OCR, and facial recognition
 - **Tracks scene changes** including vehicle/person arrivals and departures
 - **Infers intent** from multimodal evidence (visual, textual, temporal, historical)
+- **Processes voice commands** through Echonet edge devices with LLM-powered responses
 - **Respects privacy** through hashing, minimal retention, and configurable policies
 - **Maintains context** across visits using plate tracking and visitor memory
 - **Provides actionable alerts** based on configurable rules and learned patterns
+- **Enables natural conversations** via LLM-controlled listening modes
 
 ### Design Principles
 
@@ -39,6 +43,7 @@ EchoBell is a privacy-focused, multimodal doorbell intelligence system that:
 4. **Stateless classification**: Intent classification is pure function of evidence
 5. **Stateful tracking**: Scene awareness persists across frames/events
 6. **Separation of concerns**: Clear boundaries between perception, classification, storage
+7. **Bidirectional voice**: LLM can both receive and request voice input from users
 
 ---
 
@@ -1574,6 +1579,116 @@ pytest tests/test_telegram_integration.py -v -s
 ```
 
 See `tests/test_telegram_integration.py` for examples.
+
+### Voice Command Integration (Echonet)
+
+**Location**: `central/policy-server/`
+
+EchoBell integrates with Echonet edge devices to receive and process voice commands through an LLM.
+
+**Architecture**:
+
+```
+┌─────────────┐         ┌──────────────┐         ┌─────────┐
+│   Echonet   │────────▶│ Policy Server│────────▶│   LLM   │
+│  (Edge Dev) │  Voice  │  (FastAPI)   │   MCP   │  (MCP)  │
+└─────────────┘  Events └──────────────┘  Tools  └─────────┘
+       ▲                        │                       │
+       │      PUT /state        │   activate_echonet_   │
+       │   mode=open_listen     │      listening()      │
+       └────────────────────────┴───────────────────────┘
+```
+
+**Components**:
+
+1. **Voice Event Reception** (`api_voice.py`):
+   - POST /voice/listen - Receives voice events from Echonet
+   - Extracts voiceprint_user_id and confidence
+   - Maps voiceprint to trusted_person via voiceprint_person_mapping
+   - Checks authorization via mcp_tool_permissions
+   - Routes to LLM via voice_llm_fallback policy
+
+2. **Correlation ID Tracking** (`middleware.py`):
+   - CorrelationIDMiddleware extracts/generates correlation IDs
+   - Format: `echo-{timestamp}-{random_id}`
+   - Stored in contextvars for thread-safe access
+   - Propagated to MCP tools via _context parameter
+   - Logged in voice_commands table for audit trail
+
+3. **Echonet Discovery** (`echonet_service.py`):
+   - Auto-discovers Echonet instances via mDNS (_echonet._tcp.local.)
+   - Auto-registers on startup with Policy Server URL
+   - Health check with re-registration on failure
+   - Supports multiple Echonet instances
+
+4. **Listening Mode Control** (`echonet_mode_service.py`):
+   - LLM can activate "open listening" mode for multi-turn conversations
+   - PUT /state endpoint on Echonet to change modes (trigger/open_listen/inactive)
+   - Automatic timeout (30s) returns to trigger mode
+   - Enables natural conversation without repeating wake word
+
+**MCP Tools Exposed to LLM**:
+- `activate_echonet_listening` - Request additional voice input from user
+- `deactivate_echonet_listening` - End conversation, return to trigger mode
+- `get_echonet_status` - Query discovered Echonet instances and their states
+
+**Security Model**:
+- Three-tier confidence thresholds:
+  - 0.75: Information queries (status, scene context)
+  - 0.80-0.95: Tracking and logging actions
+  - >0.95: Security-critical actions (unlocking, disabling)
+- Per-tool permissions in mcp_tool_permissions table
+- Optional 2FA via Telegram for high-security actions
+
+**Database Schema**:
+- `voice_commands` - Audit trail of all voice interactions
+- `voiceprint_person_mapping` - Maps Echonet voiceprint IDs to trusted_person
+- `mcp_tool_permissions` - Per-tool voice authorization settings
+
+**Configuration**:
+```bash
+# Policy Server
+export POLICY_SERVER_BASE_URL=http://192.168.1.100:8002
+export ECHONET_API_KEY=dontgiveitupluffy
+
+# Echonet Edge Device
+export ECHONET_TARGET_NAME=echobell
+export ECHONET_WAKE_PHRASES=echobell
+export ECHONET_LISTEN_TIMEOUT=30
+```
+
+**Example Conversation Flow**:
+```
+User: "Hey Echobell, unlock the door"
+Echonet: [Sends voice event to Policy Server]
+LLM: [Detects ambiguity - multiple doors]
+LLM: [Calls activate_echonet_listening MCP tool]
+LLM: "Which door would you like to unlock?"
+User: "The front door" (no wake word needed!)
+Echonet: [Sends follow-up to Policy Server]
+LLM: [Processes complete request]
+LLM: [Calls deactivate_echonet_listening]
+```
+
+**Related Documentation**:
+- Voice Command Summary: `docs/VOICE_COMMAND_SUMMARY.md`
+- Echonet Integration: `docs/ECHONET_INTEGRATION.md`
+- Listening Mode: `docs/ECHONET_LISTENING_MODE.md`
+- Quick Reference: `docs/VOICE_QUICKREF.md`
+- ADR-0015: LLM-Controlled Voice Listening
+
+**Testing**:
+```bash
+# Set API key
+export ECHONET_API_KEY=dontgiveitupluffy
+
+# Run listening mode test
+python tests/test_echonet_listening.py \
+  --echonet-url http://192.168.1.50:8123 \
+  --test-timeout
+```
+
+See `tests/test_voice_integration.py` for comprehensive voice system tests.
 
 ---
 

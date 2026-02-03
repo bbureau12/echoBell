@@ -20,6 +20,20 @@ from datetime import datetime
 from packages.policy.evaluator import PolicyEvaluator
 from packages.scene.movement_analyzer import MovementAnalyzer, MovementConfig
 
+# Import Echonet mode service (lazy-loaded)
+_echonet_mode_service = None
+
+def get_echonet_mode_service():
+    """Get Echonet mode service (lazy-loaded)"""
+    global _echonet_mode_service
+    if _echonet_mode_service is None:
+        try:
+            from echonet_mode_service import get_echonet_mode_service as _get_svc
+            _echonet_mode_service = _get_svc()
+        except Exception:
+            pass
+    return _echonet_mode_service
+
 
 # ============================================================================
 # Policy Management Services
@@ -756,3 +770,503 @@ def get_alert_history(
         })
     
     return alerts
+
+
+# ============================================================================
+# Voice Command Services
+# ============================================================================
+
+def get_voiceprint_person_mapping(
+    conn: sqlite3.Connection,
+    voiceprint_user_id: str
+) -> Optional[int]:
+    """
+    Get trusted_person_id for a given voiceprint_user_id.
+    
+    Args:
+        conn: Database connection
+        voiceprint_user_id: Echonet voiceprint user ID
+    
+    Returns:
+        trusted_person_id if mapping exists, None otherwise
+    """
+    cursor = conn.execute(
+        "SELECT trusted_person_id FROM voiceprint_person_mapping WHERE voiceprint_user_id = ?",
+        (voiceprint_user_id,)
+    )
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def create_voiceprint_person_mapping(
+    conn: sqlite3.Connection,
+    voiceprint_user_id: str,
+    trusted_person_id: int,
+    notes: Optional[str] = None
+) -> int:
+    """
+    Create a mapping between Echonet voiceprint ID and trusted person.
+    
+    Args:
+        conn: Database connection
+        voiceprint_user_id: Echonet voiceprint user ID
+        trusted_person_id: Our trusted person ID
+        notes: Optional notes
+    
+    Returns:
+        Mapping ID
+    """
+    now = int(time.time())
+    cursor = conn.execute(
+        """
+        INSERT INTO voiceprint_person_mapping (voiceprint_user_id, trusted_person_id, created_ts, updated_ts, notes)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (voiceprint_user_id, trusted_person_id, now, now, notes)
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def list_voiceprint_mappings(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """
+    List all voiceprint to person mappings.
+    
+    Args:
+        conn: Database connection
+    
+    Returns:
+        List of mapping dicts with person names
+    """
+    cursor = conn.execute(
+        """
+        SELECT 
+            vpm.id,
+            vpm.voiceprint_user_id,
+            vpm.trusted_person_id,
+            tp.name as person_name,
+            vpm.created_ts,
+            vpm.updated_ts,
+            vpm.notes
+        FROM voiceprint_person_mapping vpm
+        LEFT JOIN trusted_person tp ON vpm.trusted_person_id = tp.trusted_id
+        ORDER BY vpm.created_ts DESC
+        """
+    )
+    
+    mappings = []
+    for row in cursor.fetchall():
+        mappings.append({
+            "id": row[0],
+            "voiceprint_user_id": row[1],
+            "trusted_person_id": row[2],
+            "person_name": row[3],
+            "created_ts": row[4],
+            "updated_ts": row[5],
+            "notes": row[6]
+        })
+    
+    return mappings
+
+
+def create_voice_command(
+    conn: sqlite3.Connection,
+    correlation_id: str,
+    echonet_event: Dict[str, Any],
+    trusted_person_id: Optional[int] = None,
+    auth_result: str = "pending",
+    auth_reason: Optional[str] = None
+) -> int:
+    """
+    Create a voice command record.
+    
+    Args:
+        conn: Database connection
+        correlation_id: Our internal correlation ID
+        echonet_event: Echonet event payload dict
+        trusted_person_id: Mapped trusted person ID
+        auth_result: Authorization result ('allowed', 'denied', '2fa_required')
+        auth_reason: Why allowed/denied
+    
+    Returns:
+        Voice command ID
+    """
+    now = int(time.time())
+    cursor = conn.execute(
+        """
+        INSERT INTO voice_commands (
+            correlation_id, echonet_event_id, session_id,
+            voiceprint_user_id, voiceprint_confidence, trusted_person_id,
+            text, speech_confidence, mode,
+            source_device, room, timestamp, received_ts,
+            auth_result, auth_reason, created_ts
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            correlation_id,
+            echonet_event.get("event_id"),
+            echonet_event.get("session_id"),
+            echonet_event.get("voiceprint_user_id"),
+            echonet_event.get("voiceprint_confidence"),
+            trusted_person_id,
+            echonet_event.get("text"),
+            echonet_event.get("confidence"),
+            echonet_event.get("mode"),
+            echonet_event.get("source_id"),
+            echonet_event.get("room"),
+            echonet_event.get("ts"),
+            now,
+            auth_result,
+            auth_reason,
+            now
+        )
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def update_voice_command_result(
+    conn: sqlite3.Connection,
+    voice_command_id: int,
+    policy_matched: Optional[str] = None,
+    llm_used: bool = False,
+    response_text: Optional[str] = None,
+    actions_taken: Optional[List[str]] = None,
+    processing_time_ms: Optional[int] = None
+) -> None:
+    """
+    Update voice command with processing results.
+    
+    Args:
+        conn: Database connection
+        voice_command_id: Voice command ID to update
+        policy_matched: Policy ID that handled this
+        llm_used: Whether LLM was used
+        response_text: Response sent to user
+        actions_taken: List of actions executed
+        processing_time_ms: Processing time in milliseconds
+    """
+    actions_json = json.dumps(actions_taken) if actions_taken else None
+    
+    conn.execute(
+        """
+        UPDATE voice_commands
+        SET policy_matched = ?,
+            llm_used = ?,
+            response_text = ?,
+            actions_taken = ?,
+            processing_time_ms = ?
+        WHERE id = ?
+        """,
+        (policy_matched, 1 if llm_used else 0, response_text, actions_json, processing_time_ms, voice_command_id)
+    )
+    conn.commit()
+
+
+def get_voice_command_by_correlation(
+    conn: sqlite3.Connection,
+    correlation_id: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Get voice command by correlation ID.
+    
+    Args:
+        conn: Database connection
+        correlation_id: Correlation ID to look up
+    
+    Returns:
+        Voice command dict if found, None otherwise
+    """
+    cursor = conn.execute(
+        """
+        SELECT 
+            id, correlation_id, echonet_event_id, session_id,
+            voiceprint_user_id, voiceprint_confidence, trusted_person_id,
+            text, speech_confidence, mode,
+            source_device, room, timestamp, received_ts,
+            policy_matched, llm_used, response_text, actions_taken,
+            auth_result, auth_reason, created_ts, processing_time_ms
+        FROM voice_commands
+        WHERE correlation_id = ?
+        """,
+        (correlation_id,)
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    
+    return {
+        "id": row[0],
+        "correlation_id": row[1],
+        "echonet_event_id": row[2],
+        "session_id": row[3],
+        "voiceprint_user_id": row[4],
+        "voiceprint_confidence": row[5],
+        "trusted_person_id": row[6],
+        "text": row[7],
+        "speech_confidence": row[8],
+        "mode": row[9],
+        "source_device": row[10],
+        "room": row[11],
+        "timestamp": row[12],
+        "received_ts": row[13],
+        "policy_matched": row[14],
+        "llm_used": bool(row[15]),
+        "response_text": row[16],
+        "actions_taken": json.loads(row[17]) if row[17] else None,
+        "auth_result": row[18],
+        "auth_reason": row[19],
+        "created_ts": row[20],
+        "processing_time_ms": row[21]
+    }
+
+
+def get_mcp_tool_permission(
+    conn: sqlite3.Connection,
+    tool_name: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Get MCP tool permission settings for voice commands.
+    
+    Args:
+        conn: Database connection
+        tool_name: Name of MCP tool
+    
+    Returns:
+        Permission dict if exists, None otherwise
+    """
+    cursor = conn.execute(
+        """
+        SELECT tool_name, voice_enabled, requires_confidence, requires_2fa, security_level, notes, created_ts, updated_ts
+        FROM mcp_tool_permissions
+        WHERE tool_name = ?
+        """,
+        (tool_name,)
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    
+    return {
+        "tool_name": row[0],
+        "voice_enabled": bool(row[1]),
+        "requires_confidence": row[2],
+        "requires_2fa": bool(row[3]),
+        "security_level": row[4],
+        "notes": row[5],
+        "created_ts": row[6],
+        "updated_ts": row[7]
+    }
+
+
+def list_mcp_tool_permissions(
+    conn: sqlite3.Connection,
+    voice_enabled_only: bool = False
+) -> List[Dict[str, Any]]:
+    """
+    List all MCP tool permissions.
+    
+    Args:
+        conn: Database connection
+        voice_enabled_only: Only return voice-enabled tools
+    
+    Returns:
+        List of permission dicts
+    """
+    query = """
+        SELECT tool_name, voice_enabled, requires_confidence, requires_2fa, security_level, notes, created_ts, updated_ts
+        FROM mcp_tool_permissions
+    """
+    params = []
+    
+    if voice_enabled_only:
+        query += " WHERE voice_enabled = 1"
+    
+    query += " ORDER BY security_level, tool_name"
+    
+    cursor = conn.execute(query, params)
+    permissions = []
+    
+    for row in cursor.fetchall():
+        permissions.append({
+            "tool_name": row[0],
+            "voice_enabled": bool(row[1]),
+            "requires_confidence": row[2],
+            "requires_2fa": bool(row[3]),
+            "security_level": row[4],
+            "notes": row[5],
+            "created_ts": row[6],
+            "updated_ts": row[7]
+        })
+    
+    return permissions
+
+
+def check_voice_authorization(
+    conn: sqlite3.Connection,
+    text: str,
+    voiceprint_confidence: Optional[float],
+    tool_name: Optional[str] = None
+) -> Tuple[bool, str, Optional[str]]:
+    """
+    Check if a voice command is authorized.
+    
+    Args:
+        conn: Database connection
+        text: Command text
+        voiceprint_confidence: Voiceprint match confidence (0-1)
+        tool_name: MCP tool name if calling a tool
+    
+    Returns:
+        Tuple of (allowed, reason, action_required)
+    """
+    # Check voiceprint confidence threshold
+    if voiceprint_confidence is None or voiceprint_confidence < 0.75:
+        return (False, "voiceprint_confidence_too_low", "request_telegram_confirmation")
+    
+    # If calling a specific MCP tool, check its permissions
+    if tool_name:
+        permission = get_mcp_tool_permission(conn, tool_name)
+        if not permission:
+            return (False, "tool_not_found", None)
+        
+        if not permission["voice_enabled"]:
+            return (False, "tool_not_voice_enabled", None)
+        
+        if voiceprint_confidence < permission["requires_confidence"]:
+            return (False, f"confidence_below_tool_threshold_{permission['requires_confidence']}", "request_telegram_confirmation")
+        
+        if permission["requires_2fa"]:
+            return (False, "tool_requires_2fa", "request_telegram_confirmation")
+        
+        # Check for security actions in text
+        if permission["security_level"] in ["high", "critical"]:
+            security_keywords = ["unlock", "disable", "delete", "remove", "open"]
+            if any(keyword in text.lower() for keyword in security_keywords):
+                if voiceprint_confidence < 0.95:
+                    return (False, "security_action_requires_high_confidence", "request_telegram_confirmation")
+    
+    return (True, "authorized", None)
+
+
+# ============================================================================
+# Echonet Mode Control Services
+# ============================================================================
+
+async def activate_echonet_listening(
+    echonet_url: str,
+    target_name: str = "echobell",
+    source: str = "llm",
+    reason: str = "Requesting additional information"
+) -> Dict[str, Any]:
+    """
+    Activate open listening mode on an Echonet instance.
+    
+    Allows the LLM to request voice input from the user without requiring
+    the wake word to be said again.
+    
+    Args:
+        echonet_url: Base URL of Echonet instance (e.g., http://192.168.1.50:8123)
+        target_name: Target name registered with Echonet (default: "echobell")
+        source: Source of the request (default: "llm")
+        reason: Human-readable reason for activation
+    
+    Returns:
+        Dict with success status and message
+    """
+    service = get_echonet_mode_service()
+    if not service:
+        return {
+            "success": False,
+            "error": "Echonet mode service not available",
+            "message": "Service not initialized"
+        }
+    
+    return await service.activate_listening(
+        echonet_url=echonet_url,
+        target_name=target_name,
+        source=source,
+        reason=reason
+    )
+
+
+async def deactivate_echonet_listening(
+    echonet_url: str,
+    target_name: str = "echobell",
+    source: str = "llm",
+    reason: str = "Conversation complete"
+) -> Dict[str, Any]:
+    """
+    Deactivate open listening mode (return to trigger mode).
+    
+    Args:
+        echonet_url: Base URL of Echonet instance
+        target_name: Target name (default: "echobell")
+        source: Source of the request (default: "llm")
+        reason: Human-readable reason for deactivation
+    
+    Returns:
+        Dict with success status and message
+    """
+    service = get_echonet_mode_service()
+    if not service:
+        return {
+            "success": False,
+            "error": "Echonet mode service not available",
+            "message": "Service not initialized"
+        }
+    
+    return await service.deactivate_listening(
+        echonet_url=echonet_url,
+        target_name=target_name,
+        source=source,
+        reason=reason
+    )
+
+
+async def get_echonet_instances_status(
+    conn: sqlite3.Connection
+) -> List[Dict[str, Any]]:
+    """
+    Get status of all discovered Echonet instances.
+    
+    Combines Echonet discovery information with their current state.
+    
+    Args:
+        conn: Database connection (for future use with caching)
+    
+    Returns:
+        List of Echonet instances with their status
+    """
+    # Import here to avoid circular dependencies
+    try:
+        from echonet_service import get_echonet_service
+        echonet_svc = get_echonet_service()
+        
+        if not echonet_svc or not echonet_svc.listener:
+            return []
+        
+        instances = []
+        for inst in echonet_svc.listener.instances.values():
+            # Get state from Echonet
+            mode_service = get_echonet_mode_service()
+            state = None
+            if mode_service:
+                state_data = await mode_service.get_echonet_state(inst.base_url)
+                if state_data:
+                    state = state_data.get("listen_mode")
+            
+            instances.append({
+                "name": inst.display_name,
+                "url": inst.base_url,
+                "zone": inst.zone,
+                "subzone": inst.subzone,
+                "current_mode": state,
+                "registered": inst.name in echonet_svc.registered_instances
+            })
+        
+        return instances
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Failed to get Echonet instances: {e}")
+        return []

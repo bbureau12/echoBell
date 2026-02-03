@@ -1,0 +1,36 @@
+# echoBell LLM Configuration
+# Configure LLM backend for conversational doorbell features
+
+[llm]
+# LLM provider: "vicuna", "claude", or "openai"
+provider = vicuna
+
+# Vicuna Configuration (local or remote server)
+[llm.vicuna]
+# Base URL of Vicuna server (can be on different machine)
+base_url = http://192.168.1.100:8000
+model = vicuna-13b-v1.5
+temperature = 0.7
+max_tokens = 2048
+
+# Claude Configuration (if using Anthropic API)
+[llm.claude]
+api_key = ${ANTHROPIC_API_KEY}
+model = claude-3-5-sonnet-20241022
+
+# OpenAI Configuration (if using GPT-4)
+[llm.openai]
+api_key = ${OPENAI_API_KEY}
+model = gpt-4
+
+# Conversation Settings
+[conversation]
+max_turns = 10
+asr_timeout = 30
+enable_tool_calling = true
+
+# Network Settings
+[network]
+timeout = 60
+retry_attempts = 3
+retry_delay = 2

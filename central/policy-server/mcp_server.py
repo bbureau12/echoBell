@@ -378,6 +378,203 @@ TOOLS = [
             }
         }
     ),
+    
+    # Quiet Hours Tools
+    Tool(
+        name="list_quiet_hours",
+        description="List all quiet hour schedules, optionally filtered by weekday or status",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "weekday": {
+                    "type": "integer",
+                    "description": "Filter by weekday (0=Monday, 6=Sunday) (optional)"
+                },
+                "enabled_only": {
+                    "type": "boolean",
+                    "description": "Only return enabled schedules (default true)",
+                    "default": True
+                }
+            }
+        }
+    ),
+    
+    Tool(
+        name="create_quiet_hour",
+        description="Create a new quiet hour schedule for a specific day and time range",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name for this quiet hour period (e.g., 'Sleep', 'Lunch', 'Work Hours')"
+                },
+                "weekday": {
+                    "type": "integer",
+                    "description": "Day of week (0=Monday, 1=Tuesday, ..., 6=Sunday)"
+                },
+                "start_time": {
+                    "type": "string",
+                    "description": "Start time in HH:MM format (24-hour, e.g., '22:00')"
+                },
+                "end_time": {
+                    "type": "string",
+                    "description": "End time in HH:MM format (24-hour, e.g., '07:00'). Can span overnight."
+                },
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Whether this schedule is active (default true)",
+                    "default": True
+                }
+            },
+            "required": ["name", "weekday", "start_time", "end_time"]
+        }
+    ),
+    
+    Tool(
+        name="update_quiet_hour",
+        description="Update an existing quiet hour schedule",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "quiet_hour_id": {
+                    "type": "integer",
+                    "description": "The quiet hour ID to update"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "New name (optional)"
+                },
+                "weekday": {
+                    "type": "integer",
+                    "description": "New weekday (optional)"
+                },
+                "start_time": {
+                    "type": "string",
+                    "description": "New start time in HH:MM format (optional)"
+                },
+                "end_time": {
+                    "type": "string",
+                    "description": "New end time in HH:MM format (optional)"
+                },
+                "enabled": {
+                    "type": "boolean",
+                    "description": "New enabled status (optional)"
+                }
+            },
+            "required": ["quiet_hour_id"]
+        }
+    ),
+    
+    Tool(
+        name="delete_quiet_hour",
+        description="Delete a quiet hour schedule by ID",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "quiet_hour_id": {
+                    "type": "integer",
+                    "description": "The quiet hour ID to delete"
+                }
+            },
+            "required": ["quiet_hour_id"]
+        }
+    ),
+    
+    Tool(
+        name="is_quiet_time",
+        description="Check if current time (or a specific timestamp) is within quiet hours",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "timestamp": {
+                    "type": "integer",
+                    "description": "Unix timestamp to check (optional, defaults to now)"
+                }
+            }
+        }
+    ),
+    
+    Tool(
+        name="get_active_quiet_hours",
+        description="Get all quiet hour schedules that are currently active (or active at a specific timestamp)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "timestamp": {
+                    "type": "integer",
+                    "description": "Unix timestamp to check (optional, defaults to now)"
+                }
+            }
+        }
+    ),
+    
+    # Echonet Voice Interaction Tools
+    Tool(
+        name="activate_echonet_listening",
+        description="""Activate open listening mode on an Echonet device to enable continuous voice conversation.
+        
+        Use this when you need additional information from the user that wasn't provided in their initial voice command.
+        The Echonet device will stay in listening mode for 30 seconds (configurable) or until the user stops speaking,
+        allowing natural conversation without requiring the wake word to be repeated.
+        
+        Examples:
+        - User says "What's the status?" - You can ask "Status of what?" by activating listening
+        - User says "Unlock the door" - You can ask "Which door?" if ambiguous
+        - User provides partial information - You can request clarification
+        
+        The device will automatically return to trigger mode after the conversation or timeout.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "echonet_url": {
+                    "type": "string",
+                    "description": "Base URL of the Echonet instance (e.g., http://192.168.1.50:8123). If not provided, uses the first discovered Echonet."
+                },
+                "target_name": {
+                    "type": "string",
+                    "description": "Target name registered with Echonet (default: 'echobell')",
+                    "default": "echobell"
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Human-readable reason for requesting voice input (optional, e.g., 'Need clarification on which door to unlock')"
+                }
+            }
+        }
+    ),
+    
+    Tool(
+        name="deactivate_echonet_listening",
+        description="Deactivate open listening mode and return Echonet to trigger mode (wake word required). Use this to end the conversation when you have sufficient information.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "echonet_url": {
+                    "type": "string",
+                    "description": "Base URL of the Echonet instance. If not provided, uses the first discovered Echonet."
+                },
+                "target_name": {
+                    "type": "string",
+                    "description": "Target name (default: 'echobell')",
+                    "default": "echobell"
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Human-readable reason for ending listening (optional, e.g., 'Conversation complete')"
+                }
+            }
+        }
+    ),
+    
+    Tool(
+        name="get_echonet_status",
+        description="Get status of all discovered Echonet instances including their current listening mode and registration state",
+        inputSchema={
+            "type": "object",
+            "properties": {}
+        }
+    ),
 ]
 
 
@@ -593,6 +790,258 @@ async def handle_get_alert_history(args: dict) -> dict:
     }
 
 
+async def handle_list_quiet_hours(args: dict) -> dict:
+    """List quiet hour schedules"""
+    from packages.data.quiet_hours_service import QuietHoursService
+    
+    weekday = args.get("weekday")
+    enabled_only = args.get("enabled_only", True)
+    
+    with get_db() as conn:
+        if weekday is not None:
+            quiet_hours = QuietHoursService.get_quiet_hours_for_day(
+                conn, 
+                weekday=weekday,
+                enabled_only=enabled_only
+            )
+        else:
+            quiet_hours = QuietHoursService.get_quiet_hours(
+                conn,
+                enabled_only=enabled_only
+            )
+    
+    # Convert QuietHour dataclass instances to dicts
+    quiet_hours_dicts = [
+        {
+            "id": qh.id,
+            "name": qh.name,
+            "weekday": qh.weekday,
+            "start_time": qh.start_time,
+            "end_time": qh.end_time,
+            "enabled": qh.enabled,
+            "is_overnight": qh.is_overnight()
+        }
+        for qh in quiet_hours
+    ]
+    
+    return {
+        "count": len(quiet_hours_dicts),
+        "quiet_hours": quiet_hours_dicts
+    }
+
+
+async def handle_create_quiet_hour(args: dict) -> dict:
+    """Create a new quiet hour schedule"""
+    from packages.data.quiet_hours_service import QuietHoursService
+    
+    with get_db() as conn:
+        quiet_hour_id = QuietHoursService.create_quiet_hour(
+            conn=conn,
+            name=args["name"],
+            weekday=args["weekday"],
+            start_time=args["start_time"],
+            end_time=args["end_time"],
+            enabled=args.get("enabled", True)
+        )
+        
+        # Fetch the created quiet hour
+        quiet_hours = QuietHoursService.get_quiet_hours(conn, enabled_only=False)
+        quiet_hour = next((qh for qh in quiet_hours if qh.id == quiet_hour_id), None)
+    
+    if not quiet_hour:
+        return {"error": "Failed to retrieve created quiet hour"}
+    
+    return {
+        "status": "created",
+        "quiet_hour": {
+            "id": quiet_hour.id,
+            "name": quiet_hour.name,
+            "weekday": quiet_hour.weekday,
+            "start_time": quiet_hour.start_time,
+            "end_time": quiet_hour.end_time,
+            "enabled": quiet_hour.enabled,
+            "is_overnight": quiet_hour.is_overnight()
+        }
+    }
+
+
+async def handle_update_quiet_hour(args: dict) -> dict:
+    """Update an existing quiet hour schedule"""
+    from packages.data.quiet_hours_service import QuietHoursService
+    
+    quiet_hour_id = args["quiet_hour_id"]
+    updates = {
+        k: v for k, v in args.items() 
+        if k != "quiet_hour_id" and v is not None
+    }
+    
+    with get_db() as conn:
+        # Update (doesn't return anything)
+        QuietHoursService.update_quiet_hour(
+            conn=conn,
+            quiet_hour_id=quiet_hour_id,
+            **updates
+        )
+        
+        # Fetch the updated quiet hour
+        quiet_hours = QuietHoursService.get_quiet_hours(conn, enabled_only=False)
+        quiet_hour = next((qh for qh in quiet_hours if qh.id == quiet_hour_id), None)
+    
+    if not quiet_hour:
+        return {"error": f"Quiet hour not found: {quiet_hour_id}"}
+    
+    return {
+        "status": "updated",
+        "quiet_hour": {
+            "id": quiet_hour.id,
+            "name": quiet_hour.name,
+            "weekday": quiet_hour.weekday,
+            "start_time": quiet_hour.start_time,
+            "end_time": quiet_hour.end_time,
+            "enabled": quiet_hour.enabled,
+            "is_overnight": quiet_hour.is_overnight()
+        }
+    }
+
+
+async def handle_delete_quiet_hour(args: dict) -> dict:
+    """Delete a quiet hour schedule"""
+    from packages.data.quiet_hours_service import QuietHoursService
+    
+    quiet_hour_id = args["quiet_hour_id"]
+    
+    with get_db() as conn:
+        # Delete doesn't return anything, just execute it
+        QuietHoursService.delete_quiet_hour(conn, quiet_hour_id)
+    
+    return {
+        "status": "deleted",
+        "quiet_hour_id": quiet_hour_id
+    }
+    
+    return {
+        "status": "deleted",
+        "quiet_hour_id": quiet_hour_id
+    }
+
+
+async def handle_is_quiet_time(args: dict) -> dict:
+    """Check if it's currently quiet time"""
+    from packages.data.quiet_hours_service import QuietHoursService
+    
+    timestamp = args.get("timestamp")
+    dt = datetime.fromtimestamp(timestamp) if timestamp else None
+    
+    with get_db() as conn:
+        is_quiet = QuietHoursService.is_quiet_time(conn, dt)
+    
+    return {
+        "is_quiet_time": is_quiet,
+        "checked_at": timestamp or int(datetime.now().timestamp())
+    }
+
+
+async def handle_get_active_quiet_hours(args: dict) -> dict:
+    """Get active quiet hour schedules"""
+    from packages.data.quiet_hours_service import QuietHoursService
+    
+    timestamp = args.get("timestamp")
+    dt = datetime.fromtimestamp(timestamp) if timestamp else None
+    
+    with get_db() as conn:
+        active_quiet_hours = QuietHoursService.get_active_quiet_hours(conn, dt)
+    
+    # Convert to dicts
+    active_dicts = [
+        {
+            "id": qh.id,
+            "name": qh.name,
+            "weekday": qh.weekday,
+            "start_time": qh.start_time,
+            "end_time": qh.end_time,
+            "is_overnight": qh.is_overnight()
+        }
+        for qh in active_quiet_hours
+    ]
+    
+    return {
+        "is_quiet_time": len(active_dicts) > 0,
+        "count": len(active_dicts),
+        "active_quiet_hours": active_dicts,
+        "checked_at": timestamp or int(datetime.now().timestamp())
+    }
+
+
+async def handle_activate_echonet_listening(args: dict) -> dict:
+    """Activate open listening mode on Echonet device"""
+    echonet_url = args.get("echonet_url")
+    target_name = args.get("target_name", "echobell")
+    reason = args.get("reason", "LLM requesting additional information")
+    
+    # If no URL provided, get first discovered Echonet
+    if not echonet_url:
+        with get_db() as conn:
+            instances = await services.get_echonet_instances_status(conn)
+        
+        if not instances:
+            return {
+                "success": False,
+                "error": "No Echonet instances discovered",
+                "message": "Please provide echonet_url or ensure Echonet discovery is running"
+            }
+        
+        echonet_url = instances[0]["url"]
+    
+    result = await services.activate_echonet_listening(
+        echonet_url=echonet_url,
+        target_name=target_name,
+        source="mcp_llm",
+        reason=reason
+    )
+    
+    return result
+
+
+async def handle_deactivate_echonet_listening(args: dict) -> dict:
+    """Deactivate open listening mode (return to trigger mode)"""
+    echonet_url = args.get("echonet_url")
+    target_name = args.get("target_name", "echobell")
+    reason = args.get("reason", "Conversation complete")
+    
+    # If no URL provided, get first discovered Echonet
+    if not echonet_url:
+        with get_db() as conn:
+            instances = await services.get_echonet_instances_status(conn)
+        
+        if not instances:
+            return {
+                "success": False,
+                "error": "No Echonet instances discovered"
+            }
+        
+        echonet_url = instances[0]["url"]
+    
+    result = await services.deactivate_echonet_listening(
+        echonet_url=echonet_url,
+        target_name=target_name,
+        source="mcp_llm",
+        reason=reason
+    )
+    
+    return result
+
+
+async def handle_get_echonet_status(args: dict) -> dict:
+    """Get status of all Echonet instances"""
+    with get_db() as conn:
+        instances = await services.get_echonet_instances_status(conn)
+    
+    return {
+        "count": len(instances),
+        "instances": instances
+    }
+
+
 # Map tool names to handlers
 TOOL_HANDLERS = {
     "list_policies": handle_list_policies,
@@ -608,6 +1057,15 @@ TOOL_HANDLERS = {
     "create_event": handle_create_event,
     "active_events_now": handle_active_events_now,
     "get_alert_history": handle_get_alert_history,
+    "list_quiet_hours": handle_list_quiet_hours,
+    "create_quiet_hour": handle_create_quiet_hour,
+    "update_quiet_hour": handle_update_quiet_hour,
+    "delete_quiet_hour": handle_delete_quiet_hour,
+    "is_quiet_time": handle_is_quiet_time,
+    "get_active_quiet_hours": handle_get_active_quiet_hours,
+    "activate_echonet_listening": handle_activate_echonet_listening,
+    "deactivate_echonet_listening": handle_deactivate_echonet_listening,
+    "get_echonet_status": handle_get_echonet_status,
 }
 
 
@@ -623,18 +1081,83 @@ async def list_tools() -> list[Tool]:
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """Handle tool execution"""
+    """Handle tool execution with permission checking for voice commands"""
     try:
+        # Extract context if provided (for voice commands)
+        context = arguments.get("_context", {})
+        correlation_id = context.get("correlation_id")
+        source = context.get("source")  # 'voice_command', 'http', etc.
+        user_id = context.get("user_id")
+        voiceprint_confidence = context.get("voiceprint_confidence")
+        
+        # Log the call with correlation ID if available
+        if correlation_id:
+            print(f"[{correlation_id}] MCP tool call: {name} (source: {source}, user: {user_id})", file=sys.stderr)
+        
+        # Check permissions for voice commands
+        if source == "voice_command":
+            with get_db() as conn:
+                permission = services.get_mcp_tool_permission(conn, name)
+                
+                if not permission:
+                    # Tool exists but no permission record - deny by default
+                    return [TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "error": f"Tool '{name}' has no voice permission configuration",
+                            "correlation_id": correlation_id
+                        })
+                    )]
+                
+                if not permission["voice_enabled"]:
+                    return [TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "error": f"Tool '{name}' is not enabled for voice commands",
+                            "correlation_id": correlation_id
+                        })
+                    )]
+                
+                if voiceprint_confidence and voiceprint_confidence < permission["requires_confidence"]:
+                    return [TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "error": f"Voiceprint confidence ({voiceprint_confidence:.2f}) below required threshold ({permission['requires_confidence']:.2f})",
+                            "requires_2fa": True,
+                            "correlation_id": correlation_id
+                        })
+                    )]
+                
+                if permission["requires_2fa"]:
+                    return [TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "error": f"Tool '{name}' requires 2FA confirmation",
+                            "requires_2fa": True,
+                            "correlation_id": correlation_id
+                        })
+                    )]
+        
         # Get the handler for this tool
         handler = TOOL_HANDLERS.get(name)
         if not handler:
             return [TextContent(
                 type="text",
-                text=json.dumps({"error": f"Unknown tool: {name}"})
+                text=json.dumps({
+                    "error": f"Unknown tool: {name}",
+                    "correlation_id": correlation_id
+                })
             )]
         
+        # Remove _context from arguments before passing to handler
+        handler_args = {k: v for k, v in arguments.items() if k != "_context"}
+        
         # Execute the handler
-        result = await handler(arguments)
+        result = await handler(handler_args)
+        
+        # Add correlation ID to result if present
+        if correlation_id and isinstance(result, dict):
+            result["_correlation_id"] = correlation_id
         
         # Return result as JSON
         return [TextContent(
@@ -643,14 +1166,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         )]
         
     except Exception as e:
-        # Return error
+        # Return error with correlation ID
         import traceback
+        error_response = {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+        if correlation_id:
+            error_response["correlation_id"] = correlation_id
+        
         return [TextContent(
             type="text",
-            text=json.dumps({
-                "error": str(e),
-                "traceback": traceback.format_exc()
-            }, indent=2)
+            text=json.dumps(error_response, indent=2)
         )]
 
 
