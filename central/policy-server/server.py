@@ -111,6 +111,25 @@ if VOICE_ROUTER_AVAILABLE:
     app.include_router(voice_router)
     print("[info] Voice command endpoints enabled at /voice/*")
 
+# Import visitor management router
+VISITOR_ROUTER_AVAILABLE = False
+try:
+    visitor_router_path = os.path.join(os.path.dirname(__file__), "api_visitors.py")
+    if os.path.exists(visitor_router_path):
+        spec = importlib.util.spec_from_file_location("api_visitors", visitor_router_path)
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            visitor_router = module.router
+            VISITOR_ROUTER_AVAILABLE = True
+except Exception as e:
+    print(f"[warning] Visitor management router not available: {e}")
+
+# Include visitor management router if available
+if VISITOR_ROUTER_AVAILABLE:
+    app.include_router(visitor_router)
+    print("[info] Visitor management endpoints enabled at /visitors/*")
+
 # Import Echonet service
 try:
     from echonet_service import init_echonet_service, get_echonet_service
@@ -889,13 +908,85 @@ async def delete_scheduled_event(event_id: int):
 
 if __name__ == "__main__":
     import uvicorn
+    import logging
+    from logging.handlers import RotatingFileHandler
+    import json
     
     # Get port from environment or default to 8000
     port = int(os.getenv("POLICY_API_PORT", "8000"))
     host = os.getenv("POLICY_API_HOST", "0.0.0.0")
+    log_level = os.getenv("LOG_LEVEL", "INFO")
+    
+    # Setup JSON file logging with rotation
+    log_dir = os.path.join(PROJECT_ROOT, "data", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "policy_api.json")
+    
+    class JSONFormatter(logging.Formatter):
+        """Format logs as JSON for structured logging"""
+        def format(self, record):
+            log_obj = {
+                "timestamp": self.formatTime(record, self.datefmt),
+                "level": record.levelname,
+                "logger": record.name,
+                "message": record.getMessage(),
+                "module": record.module,
+                "function": record.funcName,
+                "line": record.lineno
+            }
+            
+            # Add correlation_id if present
+            if hasattr(record, 'correlation_id'):
+                log_obj['correlation_id'] = record.correlation_id
+            
+            # Add exception info if present
+            if record.exc_info:
+                log_obj['exception'] = self.formatException(record.exc_info)
+            
+            return json.dumps(log_obj)
+    
+    # Configure root logger for JSON file output
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, log_level))
+    
+    # Rotating file handler (10MB max, keep 5 files)
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    file_handler.setFormatter(JSONFormatter())
+    file_handler.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
     
     print(f"Starting EchoBell Policy API on {host}:{port}")
     print(f"Database: {DB_PATH}")
+    print(f"Log file: {log_file} (JSON format, rotating)")
+    print(f"Log level: {log_level}")
     
-    uvicorn.run(app, host=host, port=port)
+    # Configure uvicorn logging
+    log_config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {
+                "format": "%(asctime)s - [%(name)s] - %(levelname)s - %(message)s",
+            },
+        },
+        "handlers": {
+            "default": {
+                "formatter": "default",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stdout",
+            },
+        },
+        "loggers": {
+            "uvicorn": {"handlers": ["default"], "level": log_level},
+            "uvicorn.error": {"level": log_level},
+            "uvicorn.access": {"handlers": ["default"], "level": log_level},
+        },
+    }
+    
+    uvicorn.run(app, host=host, port=port, log_config=log_config)
 

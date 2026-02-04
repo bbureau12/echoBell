@@ -57,6 +57,7 @@ async def handle_voice_event(event: EchonetVoiceEvent, request: Request):
     4. Returns response for TTS
     
     The correlation ID is extracted from X-Correlation-ID header or generated.
+    Client IP is logged for audit trail and security monitoring.
     """
     start_time = time.time()
     
@@ -65,7 +66,14 @@ async def handle_voice_event(event: EchonetVoiceEvent, request: Request):
     if not correlation_id:
         correlation_id = generate_correlation_id()
     
-    logger.info(f"[{correlation_id}] Received voice event: {event.text} from {event.voiceprint_user_id}")
+    # Extract client IP address (handle proxies/load balancers)
+    client_ip = request.client.host if request.client else None
+    # Check for X-Forwarded-For header (if behind proxy)
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+    
+    logger.info(f"[{correlation_id}] Received voice event from {client_ip}: {event.text} from {event.voiceprint_user_id}")
     
     with get_db() as conn:
         # Map voiceprint to trusted person
@@ -95,14 +103,15 @@ async def handle_voice_event(event: EchonetVoiceEvent, request: Request):
             tool_name=None  # TODO: Extract from command text or LLM intent
         )
         
-        # Create voice command record
+        # Create voice command record (with client IP for audit)
         voice_cmd_id = services.create_voice_command(
             conn,
             correlation_id=correlation_id,
             echonet_event=event.dict(),
             trusted_person_id=trusted_person_id,
             auth_result="allowed" if allowed else "denied",
-            auth_reason=reason
+            auth_reason=reason,
+            client_ip=client_ip
         )
         
         # If not authorized, request confirmation

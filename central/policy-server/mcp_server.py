@@ -575,6 +575,81 @@ TOOLS = [
             "properties": {}
         }
     ),
+    
+    # Visitor Intent Reclassification Tools
+    Tool(
+        name="reclassify_visitor_intent",
+        description="""Reclassify a visitor's intent by adding evidence or directly overriding the classification.
+        
+        Use this when the initial classification was incorrect or insufficient. You can either:
+        
+        1. Add evidence (recommended): Inject additional evidence that the system should have detected.
+           The classification engine will re-run with this evidence included, respecting existing rules.
+           Example: Add evidence that uniform was "ups" if OCR missed it.
+        
+        2. Direct override: Force a specific intent regardless of evidence.
+           Use sparingly - only when classification rules are fundamentally wrong.
+        
+        Common scenarios:
+        - Visitor was classified as "unknown" but you recognize them from context
+        - Uniform/vehicle details were missed by vision but clear from conversation
+        - Historical pattern suggests different intent than visual evidence
+        - User provides verbal correction via voice command
+        
+        All reclassifications are logged with full audit trail including reason and source.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "event_id": {
+                    "type": "string",
+                    "description": "The visitor event ID to reclassify (from visitor_events table)"
+                },
+                "additional_evidence": {
+                    "type": "array",
+                    "description": "Evidence to add before re-classification (e.g., [{\"source\": \"llm\", \"key\": \"uniform_type\", \"value\": \"ups\", \"conf\": 0.95}])",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source": {"type": "string", "description": "Evidence source (e.g., 'llm', 'user_correction')"},
+                            "key": {"type": "string", "description": "Evidence feature key"},
+                            "value": {"type": "string", "description": "Evidence value"},
+                            "conf": {"type": "number", "description": "Confidence (0-1, default 0.95)"},
+                            "object_id": {"type": "integer", "description": "Object ID if evidence is object-specific"}
+                        },
+                        "required": ["key", "value"]
+                    }
+                },
+                "override_intent": {
+                    "type": "string",
+                    "description": "Direct intent override (bypasses classification - use only when evidence approach fails)"
+                },
+                "override_confidence": {
+                    "type": "number",
+                    "description": "Confidence for override (required if override_intent provided, 0-1)"
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Human-readable explanation for why reclassification was needed (for audit trail)"
+                }
+            },
+            "required": ["event_id"]
+        }
+    ),
+    
+    Tool(
+        name="get_visitor_event",
+        description="Get detailed information about a specific visitor event including intent, evidence, and reclassification history",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "event_id": {
+                    "type": "string",
+                    "description": "The visitor event ID to retrieve"
+                }
+            },
+            "required": ["event_id"]
+        }
+    ),
 ]
 
 
@@ -1042,6 +1117,43 @@ async def handle_get_echonet_status(args: dict) -> dict:
     }
 
 
+async def handle_reclassify_visitor_intent(args: dict) -> dict:
+    """Reclassify a visitor event's intent with additional evidence or override"""
+    event_id = args["event_id"]
+    additional_evidence = args.get("additional_evidence")
+    override_intent = args.get("override_intent")
+    override_confidence = args.get("override_confidence")
+    reason = args.get("reason")
+    
+    with get_db() as conn:
+        result = services.reclassify_visitor_intent(
+            conn=conn,
+            event_id=event_id,
+            additional_evidence=additional_evidence,
+            override_intent=override_intent,
+            override_confidence=override_confidence,
+            reason=reason,
+            reclassified_by="mcp_llm"
+        )
+    
+    return result
+
+
+async def handle_get_visitor_event(args: dict) -> dict:
+    """Get details of a specific visitor event"""
+    event_id = args["event_id"]
+    
+    with get_db() as conn:
+        event = services.get_visitor_event(conn, event_id)
+    
+    if not event:
+        return {
+            "error": f"Visitor event not found: {event_id}"
+        }
+    
+    return event
+
+
 # Map tool names to handlers
 TOOL_HANDLERS = {
     "list_policies": handle_list_policies,
@@ -1066,6 +1178,8 @@ TOOL_HANDLERS = {
     "activate_echonet_listening": handle_activate_echonet_listening,
     "deactivate_echonet_listening": handle_deactivate_echonet_listening,
     "get_echonet_status": handle_get_echonet_status,
+    "reclassify_visitor_intent": handle_reclassify_visitor_intent,
+    "get_visitor_event": handle_get_visitor_event,
 }
 
 
