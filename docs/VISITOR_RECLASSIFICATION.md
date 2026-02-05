@@ -1,8 +1,62 @@
-# Visitor Intent Reclassification - Implementation Guide
+# Visitor Intent Reclassification
+
+> **Quick Reference**: Jump to [Quick Start](#quick-start) | [MCP Tools](#mcp-tools) | [Common Evidence Keys](#common-evidence-keys)
 
 ## Overview
 
 The visitor intent reclassification system allows the LLM (or API users) to correct misclassified visitor intents by injecting additional evidence or directly overriding classifications. This maintains the integrity of the evidence-based classification system while providing flexibility for corrections.
+
+---
+
+## Quick Start
+
+### TL;DR
+
+LLM can correct visitor intent classifications by injecting evidence or overriding directly.
+
+### Common Use Cases
+
+**Voice Correction**:
+```
+User: "That was UPS"
+LLM: get_visitor_event(most_recent)
+LLM: reclassify_visitor_intent(
+    event_id=event.id,
+    additional_evidence=[{"key": "uniform_type", "value": "ups", "conf": 0.95}],
+    reason="User voice confirmation"
+)
+```
+
+**Cross-Camera Context**:
+```
+Camera 1: Person exits UPS truck
+Camera 2: Same person at door (unknown intent)
+
+LLM: reclassify_visitor_intent(
+    event_id=camera2_event,
+    additional_evidence=[{
+        "key": "recent_intent",
+        "value": "delivery_arriving",
+        "conf": 0.80,
+        "source": "cross_camera"
+    }],
+    reason="Same visitor from Camera 1 UPS truck"
+)
+```
+
+**User Override**:
+```
+User: "That's my neighbor John"
+
+LLM: reclassify_visitor_intent(
+    event_id=event_id,
+    override_intent="neighbor_visit",
+    override_confidence=0.95,
+    reason="User identified as neighbor John"
+)
+```
+
+---
 
 ## Architecture
 

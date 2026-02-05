@@ -1,8 +1,58 @@
-# Echonet Listening Mode - LLM-Requested Voice Conversations
+# Echonet Listening Mode
+
+> **Quick Reference**: Jump to [Quick Start](#quick-start) | [MCP Tools](#mcp-tool-usage) | [Code Examples](#code-usage)
 
 ## Overview
 
 The Echonet listening mode integration allows the LLM to request additional voice input from users when it needs more information. Instead of requiring the user to say the wake word again, the LLM can activate "open listening" mode for a natural conversational experience.
+
+**Implemented**: January 2025 | **Status**: ✅ Complete and tested
+
+---
+
+## Quick Start
+
+### TL;DR
+
+LLM can activate "open listening" mode on Echonet devices for multi-turn conversations without requiring users to repeat the wake word.
+
+### Common Flows
+
+**Clarification Needed**:
+```
+User: "Unlock the door"
+LLM: activate_echonet_listening(reason="Ambiguous door")
+LLM: "Which door - front, back, or garage?"
+User: "Front door"
+LLM: [Process unlock]
+LLM: deactivate_echonet_listening(reason="Got clarification")
+```
+
+**Confirmation Required**:
+```
+User: "Disable security"
+LLM: activate_echonet_listening(reason="Security action confirmation")
+LLM: "This will disable all cameras. Confirm?"
+User: "Yes, confirmed"
+LLM: [Execute if voiceprint high confidence]
+LLM: deactivate_echonet_listening(reason="Confirmed")
+```
+
+**Multi-Step Interaction**:
+```
+User: "Create schedule"
+LLM: activate_echonet_listening(reason="Multi-step creation")
+LLM: "What should happen?"
+User: "Lock doors at 10pm"
+LLM: "Which days?"
+User: "Weekdays"
+LLM: [Create schedule]
+LLM: deactivate_echonet_listening(reason="Schedule created")
+```
+
+---
+
+## Architecture
 
 ## How It Works
 
@@ -22,7 +72,19 @@ The Echonet listening mode integration allows the LLM to request additional voic
 7. Echonet sends additional voice → LLM processes complete request
 8. LLM deactivates listening or timeout occurs
 
-## Architecture
+### State Transitions
+
+**Echonet Listen Modes**:
+1. **trigger**: Default mode, requires wake word
+2. **open_listen**: Continuous listening (30s timeout)
+3. **inactive**: Microphone completely off
+
+**Transition Flow**:
+```
+trigger ──[LLM activates]──► open_listen ──[timeout/deactivate]──► trigger
+   ▲                                                                    │
+   └────────────────────────────────────────────────────────────────────┘
+```
 
 ```
 ┌─────────────┐         ┌──────────────┐         ┌─────────┐
@@ -36,23 +98,96 @@ The Echonet listening mode integration allows the LLM to request additional voic
        └────────────────────────┴───────────────────────┘
 ```
 
-### Components
+---
 
-1. **EchonetModeService** (`echonet_mode_service.py`)
+## Implementation Components
+
+### Files Created
+
+1. **Core Service Layer** - `central/policy-server/echonet_mode_service.py`
+   - `EchonetModeService` class
    - `activate_listening()` - PUT /state with mode="open_listen"
    - `deactivate_listening()` - PUT /state with mode="trigger"
    - `get_echonet_state()` - GET /state
    - Uses httpx for async HTTP with API key auth
 
-2. **Services Layer** (`services.py`)
+2. **Documentation** - `docs/guides/ECHONET_LISTENING_MODE.md`
+   - Comprehensive guide (this file)
+   - Architecture diagrams
+   - MCP tool usage examples
+   - Troubleshooting guide
+
+3. **Testing** - `tests/test_echonet_listening.py`
+   - Manual verification script
+   - Activation/deactivation flow test
+   - Timeout behavior test
+
+### Files Modified
+
+1. **Services Layer** - `central/policy-server/services.py`
    - `activate_echonet_listening()` - Wrapper for activation
    - `deactivate_echonet_listening()` - Wrapper for deactivation
    - `get_echonet_instances_status()` - Status of all Echonets
 
-3. **MCP Tools** (`mcp_server.py`)
-   - `activate_echonet_listening` - Exposed to LLM
-   - `deactivate_echonet_listening` - Exposed to LLM
-   - `get_echonet_status` - Query instance states
+2. **MCP Server** - `central/policy-server/mcp_server.py`
+   - Added 3 new MCP tools to TOOLS list:
+     - `activate_echonet_listening` - LLM can request voice input
+     - `deactivate_echonet_listening` - LLM can end conversation
+     - `get_echonet_status` - Query Echonet instance states
+   - Added corresponding tool handlers
+   - Registered in `TOOL_HANDLERS` dictionary
+
+3. **Database Migration** - `infra/db/migrations/015_add_voice_commands.sql`
+   - Added tool permissions for Echonet tools:
+     - `activate_echonet_listening`: voice_enabled=1, confidence=0.75, level=normal
+     - `deactivate_echonet_listening`: voice_enabled=1, confidence=0.75, level=normal
+     - `get_echonet_status`: voice_enabled=1, confidence=0.75, level=low
+
+---
+
+## Code Usage
+
+### From Services Layer
+```python
+from services import activate_echonet_listening, deactivate_echonet_listening
+
+# Activate
+result = await activate_echonet_listening(
+    echonet_url="http://192.168.1.50:8123",
+    target_name="echobell",
+    source="llm",
+    reason="Need more info"
+)
+
+# Deactivate
+result = await deactivate_echonet_listening(
+    echonet_url="http://192.168.1.50:8123",
+    target_name="echobell",
+    source="llm",
+    reason="Done"
+)
+```
+
+### Direct Service Access
+```python
+from echonet_mode_service import get_echonet_mode_service
+
+service = get_echonet_mode_service()
+
+# Activate
+await service.activate_listening(
+    echonet_url="http://192.168.1.50:8123",
+    target_name="echobell",
+    source="test",
+    reason="Testing"
+)
+
+# Get state
+state = await service.get_echonet_state("http://192.168.1.50:8123")
+print(state['listen_mode'])  # 'trigger', 'open_listen', or 'inactive'
+```
+
+---
 
 ## MCP Tool Usage
 
@@ -186,43 +321,23 @@ User: "Yes, and turn on the porch light"
 LLM: Processes both requests
 ```
 
-## Configuration
+---
+
+## Configuration & Permissions
 
 ### Environment Variables
 
-**Echonet Side** (edge device):
+**Policy Server**:
 ```bash
-ECHONET_LISTEN_TIMEOUT=30          # Seconds in open_listen before timeout
+ECHONET_API_KEY=dontgiveitupluffy  # Must match Echonet
+```
+
+**Echonet Edge Device**:
+```bash
+ECHONET_LISTEN_TIMEOUT=30          # Seconds before auto-return to trigger
 ECHONET_WAKE_PHRASES=echobell      # Wake word(s)
 ECHONET_TARGET_NAME=echobell       # Target name for state API
 ```
-
-**Policy Server Side**:
-```bash
-ECHONET_API_KEY=dontgiveitupluffy  # API key for Echonet state changes
-```
-
-### Echonet State API
-
-The Echonet state endpoint is defined in `edge/echonet/server.py`:
-
-```python
-@router.put("/state")
-async def update_listen_mode(request: ListenModeRequest):
-    """
-    Update the listening mode.
-    
-    Modes:
-    - trigger: Wait for wake word
-    - open_listen: Continuous listening (with timeout)
-    - inactive: Completely off
-    """
-    # Validate X-API-Key header
-    # Update _state.listen_mode
-    # Return new state
-```
-
-## Security & Authorization
 
 ### Tool Permissions
 
@@ -249,42 +364,82 @@ Defined in `mcp_tool_permissions` table:
 - Timeout prevents stuck-open microphones
 - Configurable per Echonet instance
 
+---
+
 ## Testing
 
-### Manual Testing
-
+### Quick Test
 ```bash
-# 1. Start policy server with Echonet discovery
-cd central/policy-server
-python server.py
+# Set API key
+export ECHONET_API_KEY=dontgiveitupluffy
 
-# 2. Verify Echonet discovered
-curl http://localhost:8002/admin/echonet/status
+# Run test script
+cd tests
+python test_echonet_listening.py \
+  --echonet-url http://192.168.1.50:8123 \
+  --target-name echobell \
+  --test-timeout
 
-# 3. Simulate LLM activating listening
-curl -X POST http://localhost:8002/test/activate-listening \
-  -H "Content-Type: application/json" \
-  -d '{"reason": "Testing LLM-requested conversation"}'
-
-# 4. Check Echonet state
-curl http://echonet-ip:8123/state
-# Should show: "listen_mode": "open_listen"
-
-# 5. Wait for timeout or deactivate
-curl -X POST http://localhost:8002/test/deactivate-listening
+# Expected output:
+# ✓ Successfully activated open_listen mode
+# ✓ Successfully deactivated back to trigger mode
+# ✓ Echonet auto-returned to trigger mode after timeout
 ```
 
-### Integration Test
+### Integration Verification
 
-See `tests/test_echonet_listening.py`:
+1. **Start policy server**:
+   ```bash
+   cd central/policy-server
+   python server.py
+   ```
 
-```python
-async def test_llm_activates_listening():
-    # Setup: Echonet in trigger mode
-    # Action: LLM calls activate_echonet_listening
-    # Assert: Echonet mode changes to open_listen
-    # Cleanup: Deactivate or wait for timeout
+2. **Verify Echonet discovered**:
+   ```bash
+   curl http://localhost:8002/admin/echonet/status
+   ```
+
+3. **Test LLM activation** (via MCP client):
+   ```
+   Human: "Can you check the Echonet status?"
+   LLM: [Calls get_echonet_status tool]
+   
+   Human: "Activate listening mode to ask me a question"
+   LLM: [Calls activate_echonet_listening tool]
+   ```
+
+4. **Verify mode change**:
+   ```bash
+   curl http://192.168.1.50:8123/state
+   # Should show: "listen_mode": "open_listen"
+   ```
+
+### Database Queries
+
+**Recent activations**:
+```sql
+SELECT 
+  correlation_id,
+  text,
+  actions_taken,
+  timestamp
+FROM voice_commands
+WHERE actions_taken LIKE '%activate_echonet_listening%'
+ORDER BY timestamp DESC
+LIMIT 10;
 ```
+
+**Activation success rate**:
+```sql
+SELECT 
+  COUNT(*) as total_activations,
+  SUM(CASE WHEN auth_result = 'allowed' THEN 1 ELSE 0 END) as successful,
+  AVG(processing_time_ms) as avg_time_ms
+FROM voice_commands
+WHERE actions_taken LIKE '%activate_echonet_listening%';
+```
+
+---
 
 ## Troubleshooting
 
@@ -395,23 +550,43 @@ if got_all_needed_info():
     await deactivate_listening(reason="Conversation complete")
 ```
 
-## Future Enhancements
+---
 
-### Planned Features
+## Known Limitations & Future Enhancements
 
-1. **Session Awareness**: Link multi-turn via `session_id` in `voice_commands`
-2. **Adaptive Timeouts**: Extend timeout if user still speaking
-3. **Zone-Aware Activation**: Only activate Echonet in user's current zone
-4. **Confidence Decay**: Require higher confidence for extended conversations
-5. **Multi-Echonet Dialog**: Coordinate across multiple Echonet instances
+### Current Limitations
 
-### Roadmap Integration
+1. **No Session Tracking**: No link between activate/deactivate calls
+   - Future: Use `session_id` in `voice_commands` table
 
-See `docs/ROADMAP.md` section "Voice Interface Enhancements" for:
-- Emotion detection during conversations
-- Interrupt handling (user says "wait" or "stop")
-- Voice-based 2FA for high-security actions
-- Speaker diarization for multi-person conversations
+2. **Single Echonet Auto-Selection**: When URL not provided, uses first discovered
+   - Future: Zone-aware selection based on user location
+
+3. **Fixed Timeout**: 30s timeout configured on Echonet side
+   - Future: Dynamic timeout based on conversation complexity
+
+4. **No Interrupt Handling**: User can't interrupt LLM during question
+   - Future: Support "wait", "stop", "never mind" interrupts
+
+### Roadmap
+
+**Q1 2026**:
+- [ ] Session tracking for multi-turn conversations
+- [ ] Adaptive timeouts (extend if user still speaking)
+- [ ] Zone-aware Echonet selection
+
+**Q2 2026**:
+- [ ] Emotion detection during conversations
+- [ ] Speaker diarization for multi-person dialogs
+- [ ] Interrupt handling (stop/wait/cancel commands)
+- [ ] Multi-Echonet coordination (follow user room-to-room)
+
+**Q3 2026**:
+- [ ] Voice-based 2FA integration for security actions
+- [ ] Confidence decay for extended conversations
+- [ ] Context-aware timeout adjustment
+
+---
 
 ## Related Documentation
 
@@ -419,3 +594,4 @@ See `docs/ROADMAP.md` section "Voice Interface Enhancements" for:
 - `ECHONET_INTEGRATION.md` - Echonet discovery and registration
 - `MCP_SERVER.md` - MCP tool development guide
 - `TRUST_FLOW.md` - Voiceprint authorization model
+
