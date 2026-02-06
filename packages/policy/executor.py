@@ -9,6 +9,9 @@ import sqlite3
 import logging
 from .action_handlers import ActionRegistry
 
+# Import action handlers to trigger registration
+from .actions import *  # noqa: F401, F403
+
 logger = logging.getLogger(__name__)
 
 

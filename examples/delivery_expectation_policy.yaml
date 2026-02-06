@@ -1,0 +1,150 @@
+# Temporal Context Policy - Delivery Expectation Override
+
+# This policy demonstrates how to use scheduled events to override
+# low-confidence classifications based on temporal context.
+
+# Use case: "We're expecting pizza in 2 hours"
+# - User says: "Hey Echobell, we're expecting pizza delivery in 2 hours"
+# - LLM creates scheduled_event with policy_hint="expecting_delivery"
+# - When unknown vehicle arrives, this policy reclassifies it as delivery
+
+policies:
+  - id: expected_delivery_override
+    name: "Expected Delivery - Boost Confidence"
+    description: "Override low-confidence authority/unknown with delivery when expecting delivery"
+    enabled: true
+    priority: 90  # High priority to override normal classification
+    
+    conditions:
+      all:
+        # Vehicle present
+        - evidence_exists:
+            source: vision
+            feature: vehicle_present
+        
+        # Active delivery expectation window
+        - active_event:
+            policy_hint: "expecting_delivery"
+        
+        # NOT a trusted plate (we know our own vehicles)
+        - not:
+            trust_check:
+              table: trusted_plates
+              match_field: plate_hmac
+              exists: true
+        
+        # Optional: Only override if current intent is uncertain
+        # Uncomment to be more conservative:
+        # - any:
+        #     - evidence_value_eq:
+        #         source: classification
+        #         feature: intent
+        #         value: "unknown"
+        #     - evidence_value_eq:
+        #         source: classification
+        #         feature: intent
+        #         value: "authority"
+        #     - evidence_value_lt:
+        #         source: classification
+        #         feature: confidence
+        #         threshold: 0.60
+    
+    actions:
+      # Reclassify to delivery
+      - type: reclassify
+        event_id: "{event_id}"  # From context
+        intent: "delivery_arriving"
+        confidence: 0.85
+        reason: "Active delivery expectation window (scheduled event)"
+      
+      # Announce arrival
+      - type: speak
+        text: "Your delivery has arrived!"
+      
+      # Low-priority notification
+      - type: telegram
+        priority: low
+        message: "🍕 Delivery arrived at {camera_name} (expected)"
+
+# ============================================================================
+# More Examples
+# ============================================================================
+
+  - id: expected_guest_boost
+    name: "Expected Guest - Upgrade Stranger to Friend"
+    description: "When expecting guests, upgrade unknown people to friend_visit"
+    enabled: true
+    priority: 85
+    
+    conditions:
+      all:
+        - evidence_exists:
+            source: vision
+            feature: person_present
+        - active_event:
+            policy_hint: "expecting_guests"
+        - not:
+            trust_check:
+              table: trusted_person
+              match_field: visitor_id
+              exists: true
+    
+    actions:
+      - type: reclassify
+        intent: "friend_visit"
+        confidence: 0.80
+        reason: "Active guest expectation"
+      - type: speak
+        text: "Welcome! Come on in."
+
+  - id: service_appointment_window
+    name: "Service Appointment - Technician Expected"
+    description: "During service appointments, boost technician confidence"
+    enabled: true
+    priority: 85
+    
+    conditions:
+      all:
+        - evidence_exists:
+            source: vision
+            feature: vehicle_present
+        - active_event:
+            policy_hint: "service_appointment"
+        # Only during business hours
+        - time_between:
+            start: "08:00"
+            end: "18:00"
+        - day_of_week:
+            days: [mon, tue, wed, thu, fri]
+    
+    actions:
+      - type: reclassify
+        intent: "technician_visit"
+        confidence: 0.85
+        reason: "Active service appointment window"
+      - type: speak
+        text: "Your technician has arrived."
+      - type: telegram
+        priority: normal
+        message: "🔧 Technician arrived for appointment"
+
+# ============================================================================
+# Voice Command Integration Example
+# ============================================================================
+
+# User: "Hey Echobell, we're expecting pizza in 2 hours"
+# 
+# LLM receives command, calls MCP tool:
+#   create_scheduled_event(
+#       name="Pizza Delivery",
+#       start_ts=now,
+#       end_ts=now + 7200,  # 2 hours
+#       policy_hint="expecting_delivery"
+#   )
+#
+# Later: Unknown vehicle arrives (low confidence)
+# Policy evaluator:
+#   - Checks active_event("expecting_delivery") → TRUE
+#   - Policy matches → executes reclassify action
+#   - Event intent changed: unknown → delivery_arriving
+#   - Announces: "Your delivery has arrived!"
