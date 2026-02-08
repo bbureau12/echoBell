@@ -177,6 +177,14 @@ scene_tracker = SceneTracker(
 # Initialize MovementAnalyzer
 movement_analyzer = MovementAnalyzer(movement_config)
 
+# Initialize WatchWorker
+from packages.policy.watch_worker import WatchWorker
+watch_worker = WatchWorker(
+    db_path=DB_PATH,
+    poll_interval_seconds=5,      # Check for due watches every 5 seconds
+    expire_check_interval_seconds=60  # Expire old watches every minute
+)
+
 # Database connection context manager
 @contextmanager
 def get_db():
@@ -297,6 +305,10 @@ class ObservationResponse(BaseModel):
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on startup"""
+    # Start watch worker
+    await watch_worker.start()
+    print("[info] Watch worker started")
+    
     if ECHONET_SERVICE_AVAILABLE:
         try:
             echonet_svc = init_echonet_service(
@@ -314,6 +326,10 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
+    # Stop watch worker
+    await watch_worker.stop()
+    print("[info] Watch worker stopped")
+    
     if ECHONET_SERVICE_AVAILABLE:
         echonet_svc = get_echonet_service()
         if echonet_svc:
@@ -330,6 +346,11 @@ async def health_check():
         "scene_tracker": {
             "iou_threshold": scene_tracker.iou_match_threshold,
             "grace_period_s": retention.scene_tracking_grace_period_s
+        },
+        "watch_worker": {
+            "running": watch_worker.running,
+            "poll_interval_s": watch_worker.poll_interval,
+            "expire_check_interval_s": watch_worker.expire_check_interval
         }
     }
     
@@ -394,6 +415,136 @@ async def echonet_manual_register():
         "message": "Registration attempted for all discovered instances",
         "result": result
     }
+
+
+@app.get("/admin/watches")
+async def get_watches(state: Optional[str] = None, limit: int = 100):
+    """
+    Get all watches (for debugging/monitoring).
+    
+    Args:
+        state: Optional state filter (armed, triggered, disarmed, expired)
+        limit: Max results (default: 100)
+    """
+    try:
+        from packages.policy.watch_service import WatchService, WatchState
+        
+        with get_db() as conn:
+            watch_service = WatchService(DB_PATH)
+            
+            # Parse state filter
+            state_enum = None
+            if state:
+                try:
+                    state_enum = WatchState(state)
+                except ValueError:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid state: {state}. Must be one of: armed, triggered, disarmed, expired"
+                    )
+            
+            watches = watch_service.get_all_watches(conn, state=state_enum, limit=limit)
+            
+            return {
+                "watches": [w.to_dict() for w in watches],
+                "count": len(watches),
+                "state_filter": state,
+                "limit": limit
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get watches: {str(e)}")
+
+
+@app.get("/admin/watches/due")
+async def get_due_watches():
+    """Get all watches that are currently due for evaluation."""
+    try:
+        from packages.policy.watch_service import WatchService
+        
+        with get_db() as conn:
+            watch_service = WatchService(DB_PATH)
+            due_watches = watch_service.get_due_watches(conn)
+            
+            return {
+                "watches": [w.to_dict() for w in due_watches],
+                "count": len(due_watches),
+                "timestamp": int(time.time())
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get due watches: {str(e)}")
+
+
+@app.get("/admin/watches/{watch_id}")
+async def get_watch(watch_id: int):
+    """Get a specific watch by ID."""
+    try:
+        from packages.policy.watch_service import WatchService
+        
+        with get_db() as conn:
+            watch_service = WatchService(DB_PATH)
+            watch = watch_service.get_watch_by_id(conn, watch_id)
+            
+            if not watch:
+                raise HTTPException(status_code=404, detail=f"Watch {watch_id} not found")
+            
+            return watch.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get watch: {str(e)}")
+
+
+@app.get("/admin/watches/track/{scene_track_id}")
+async def get_watches_for_track(scene_track_id: int, state: Optional[str] = None):
+    """Get all watches for a specific scene track."""
+    try:
+        from packages.policy.watch_service import WatchService, WatchState
+        
+        with get_db() as conn:
+            watch_service = WatchService(DB_PATH)
+            
+            # Parse state filter
+            state_enum = None
+            if state:
+                try:
+                    state_enum = WatchState(state)
+                except ValueError:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid state: {state}. Must be one of: armed, triggered, disarmed, expired"
+                    )
+            
+            watches = watch_service.get_watches_for_track(conn, scene_track_id, state=state_enum)
+            
+            return {
+                "scene_track_id": scene_track_id,
+                "watches": [w.to_dict() for w in watches],
+                "count": len(watches),
+                "state_filter": state
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get watches for track: {str(e)}")
+
+
+@app.post("/admin/watches/cleanup")
+async def cleanup_old_watches(days_old: int = 30):
+    """
+    Hard-delete watches older than N days (non-armed states only).
+    
+    Args:
+        days_old: Delete watches older than this many days (default: 30)
+    """
+    try:
+        deleted_count = await watch_worker.cleanup_old_watches(days_old)
+        return {
+            "deleted_count": deleted_count,
+            "days_old": days_old,
+            "message": f"Deleted {deleted_count} watches older than {days_old} days"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to cleanup watches: {str(e)}")
 
 
 @app.get("/health_old")

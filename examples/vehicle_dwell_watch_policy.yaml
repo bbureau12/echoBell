@@ -1,0 +1,134 @@
+# Example Policy: Vehicle Dwell Time Monitoring
+#
+# Scenario: Alert if unknown vehicle parks for extended period
+#
+# This demonstrates:
+# - Vehicle-specific watches
+# - Using watch_key for deduplication (same vehicle won't create multiple watches)
+# - Different time thresholds for different trust levels
+
+policies:
+  # Policy 1: Unknown vehicle parks - create watch
+  - id: unknown_vehicle_initial
+    name: "Unknown Vehicle - Initial Watch"
+    description: "Create watch when unknown vehicle enters and stops"
+    enabled: true
+    priority: 50
+    
+    conditions:
+      all:
+        - evidence_exists:
+            source: "scene"
+            feature: "vehicle_stopped"
+        - trust_check:
+            type: "vehicle"
+            level: "unknown"
+        - camera_id_in: [3, 4]  # Driveway and street cameras
+    
+    actions:
+      - type: create_watch
+        watch_type: "vehicle_dwell_5min"
+        due_in_seconds: 300
+        expires_in_seconds: 1200
+        context:
+          vehicle_trust: "unknown"
+          severity: "low"
+  
+  # Policy 2: 5-minute alert for unknown vehicle
+  - id: unknown_vehicle_5min
+    name: "Unknown Vehicle - 5 Minute Alert"
+    description: "Alert when unknown vehicle parks for 5+ minutes"
+    enabled: true
+    priority: 60
+    
+    conditions:
+      all:
+        - evidence_exists:
+            source: "watch"
+            feature: "triggered"
+            value: "vehicle_dwell_5min"
+        - evidence_exists:
+            source: "scene"
+            feature: "vehicle_present"
+        - track_duration_gt: 300
+    
+    actions:
+      - type: telegram
+        message: "🚗 Unknown vehicle parked at {camera_name} for 5+ minutes\nPlate: {plate_number}"
+        severity: "medium"
+        snapshot: true
+      
+      - type: create_watch
+        watch_type: "vehicle_dwell_15min"
+        due_in_seconds: 600  # Additional 10 minutes
+        expires_in_seconds: 1200
+        context:
+          escalation_level: 2
+          severity: "medium"
+  
+  # Policy 3: Distrusted vehicle - immediate alert + shorter watch
+  - id: distrusted_vehicle_alert
+    name: "Distrusted Vehicle - Immediate Alert"
+    description: "Alert immediately for distrusted vehicles with short escalation"
+    enabled: true
+    priority: 100
+    
+    conditions:
+      all:
+        - evidence_exists:
+            source: "scene"
+            feature: "vehicle_entered"
+        - trust_check:
+            type: "vehicle"
+            level: "distrust"
+    
+    actions:
+      - type: telegram
+        message: "⚠️ DISTRUSTED vehicle detected at {camera_name}\nPlate: {plate_number}"
+        severity: "high"
+        snapshot: true
+      
+      - type: create_watch
+        watch_type: "distrusted_vehicle_dwell_2min"
+        due_in_seconds: 120  # Much shorter watch for distrusted
+        expires_in_seconds: 600
+        context:
+          vehicle_trust: "distrust"
+          severity: "high"
+  
+  # Policy 4: Distrusted vehicle still present after 2 minutes
+  - id: distrusted_vehicle_escalate
+    name: "Distrusted Vehicle - Escalation"
+    description: "Escalate when distrusted vehicle lingers"
+    enabled: true
+    priority: 110
+    
+    conditions:
+      all:
+        - evidence_exists:
+            source: "watch"
+            feature: "triggered"
+            value: "distrusted_vehicle_dwell_2min"
+        - evidence_exists:
+            source: "scene"
+            feature: "vehicle_present"
+    
+    actions:
+      - type: telegram
+        message: "🚨 DISTRUSTED vehicle still present at {camera_name} after 2+ minutes\nPlate: {plate_number}"
+        severity: "critical"
+        snapshot: true
+
+# Variables
+variables:
+  camera_name:
+    from_context: "camera_id"
+    mapping:
+      "3": "Driveway"
+      "4": "Street View"
+  
+  plate_number:
+    from_evidence:
+      source: "perception"
+      feature: "license_plate"
+      default: "Unknown"

@@ -1,6 +1,6 @@
 # EchoBell Documentation Index
 
-**Last Updated:** January 26, 2026
+**Last Updated:** February 8, 2026
 
 Welcome to the EchoBell documentation! This index will help you find what you need.
 
@@ -22,10 +22,24 @@ Welcome to the EchoBell documentation! This index will help you find what you ne
 ### System Architecture
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Complete system architecture
-  - Edge/Central separation
+  - Full component overview
   - Data flow diagrams
-  - Component interactions
+  - Module breakdown
   - Deployment patterns
+
+- **[TWO_LAYER_ARCHITECTURE.md](TWO_LAYER_ARCHITECTURE.md)** ⭐ - Edge/Policy separation explained
+  - Why two layers?
+  - What each layer does (and doesn't do)
+  - Communication protocol
+  - Deployment topologies
+  - Complete data flow examples
+  - Troubleshooting guide
+
+- **[LAYER_COMPARISON.md](LAYER_COMPARISON.md)** 📊 - Quick reference comparison chart
+  - Edge vs Policy capabilities table
+  - Decision tree: "Should this be on edge or policy?"
+  - Common mistakes to avoid
+  - Example scenarios with step-by-step flows
 
 - **[DATABASE_SCHEMA.md](DATABASE_SCHEMA.md)** - Database schema reference
   - All tables and columns
@@ -92,11 +106,31 @@ Welcome to the EchoBell documentation! This index will help you find what you ne
 ### Action Handlers
 
 - **[guides/ACTION_HANDLERS_GUIDE.md](guides/ACTION_HANDLERS_GUIDE.md)** - Complete action handler guide
-  - Built-in handlers (telegram, speak, webhook, log)
+  - Built-in handlers (telegram, speak, webhook, log, create_watch)
   - Creating custom handlers
   - Handler registration
   - Variable substitution
   - Testing handlers
+
+### Watch System ⭐ NEW
+
+- **[../examples/WATCH_SYSTEM.md](../examples/WATCH_SYSTEM.md)** - Complete watch system guide
+  - Time-based policy evaluation
+  - Escalation chains
+  - Testing watches
+  - Best practices
+  - Common patterns
+
+- **[ARCHITECTURE.md#watch-system](ARCHITECTURE.md#watch-system)** - Watch system architecture
+  - Core concepts
+  - Components (WatchService, WatchWorker)
+  - Example policies
+  - Admin API endpoints
+
+- **Example Policies**:
+  - `examples/loitering_watch_policy.yaml` - Person loitering escalation (2→5→10 min)
+  - `examples/vehicle_dwell_watch_policy.yaml` - Vehicle parking monitoring (trust-based)
+  - `examples/delivery_timeout_watch_policy.yaml` - Delivery expectation tracking
 
 ---
 

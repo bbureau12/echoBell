@@ -7,5 +7,6 @@ Handlers are automatically registered when imported.
 
 # Import all handlers to trigger @register_action_handler decorators
 from .reclassify_handler import ReclassifyActionHandler
+from .create_watch_handler import CreateWatchActionHandler
 
-__all__ = ['ReclassifyActionHandler']
+__all__ = ['ReclassifyActionHandler', 'CreateWatchActionHandler']

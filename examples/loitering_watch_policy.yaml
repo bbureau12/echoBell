@@ -1,0 +1,132 @@
+# Example Policy: Loitering Detection with Escalation
+#
+# This demonstrates the watch-based escalation pattern:
+# 1. Unknown person enters → create 2-minute watch
+# 2. At 2 minutes: check if still present → alert + create 5-minute watch
+# 3. At 5 minutes: check if still present → escalate alert
+#
+# This policy set implements the full escalation chain.
+
+policies:
+  # STEP 1: Initial detection creates first watch
+  - id: unknown_person_initial_watch
+    name: "Unknown Person - Initial Detection"
+    description: "Create watch when unknown person enters scene"
+    enabled: true
+    priority: 50
+    
+    conditions:
+      all:
+        - evidence_exists:
+            source: "scene"
+            feature: "person_entered"
+        - trust_check:
+            type: "face"
+            level: "unknown"
+        - camera_id_in: [1, 2]  # Front door, side door only
+    
+    actions:
+      - type: create_watch
+        watch_type: "loitering_2min"
+        due_in_seconds: 120
+        expires_in_seconds: 600  # Expire 5 min after due if not evaluated
+        context:
+          initial_detection: true
+          severity: "low"
+  
+  # STEP 2: 2-minute watch fires → alert + create next watch
+  - id: unknown_person_2min_alert
+    name: "Unknown Person - 2 Minute Alert"
+    description: "Alert when unknown person loiters for 2+ minutes"
+    enabled: true
+    priority: 60
+    
+    conditions:
+      all:
+        - evidence_exists:
+            source: "watch"
+            feature: "triggered"
+            value: "loitering_2min"
+        - evidence_exists:
+            source: "scene"
+            feature: "person_present"
+        - track_duration_gt: 120  # Verify actually 2+ minutes
+    
+    actions:
+      - type: telegram
+        message: "⚠️ Unknown person loitering at {camera_name} for 2+ minutes"
+        severity: "medium"
+        snapshot: true
+      
+      - type: create_watch
+        watch_type: "loitering_5min"
+        due_in_seconds: 180  # Additional 3 minutes (5 min total)
+        expires_in_seconds: 600
+        context:
+          escalation_level: 2
+          severity: "medium"
+  
+  # STEP 3: 5-minute watch fires → escalate
+  - id: unknown_person_5min_escalate
+    name: "Unknown Person - 5 Minute Escalation"
+    description: "Escalate alert when unknown person loiters for 5+ minutes"
+    enabled: true
+    priority: 70
+    
+    conditions:
+      all:
+        - evidence_exists:
+            source: "watch"
+            feature: "triggered"
+            value: "loitering_5min"
+        - evidence_exists:
+            source: "scene"
+            feature: "person_present"
+        - track_duration_gt: 300  # Verify actually 5+ minutes
+    
+    actions:
+      - type: telegram
+        message: "🚨 ESCALATED: Unknown person still loitering at {camera_name} for 5+ minutes"
+        severity: "high"
+        snapshot: true
+      
+      - type: create_watch
+        watch_type: "loitering_10min"
+        due_in_seconds: 300  # Additional 5 minutes (10 min total)
+        expires_in_seconds: 600
+        context:
+          escalation_level: 3
+          severity: "high"
+  
+  # STEP 4: 10-minute watch fires → critical alert
+  - id: unknown_person_10min_critical
+    name: "Unknown Person - 10 Minute Critical"
+    description: "Critical alert when unknown person loiters for 10+ minutes"
+    enabled: true
+    priority: 80
+    
+    conditions:
+      all:
+        - evidence_exists:
+            source: "watch"
+            feature: "triggered"
+            value: "loitering_10min"
+        - evidence_exists:
+            source: "scene"
+            feature: "person_present"
+        - track_duration_gt: 600  # Verify actually 10+ minutes
+    
+    actions:
+      - type: telegram
+        message: "🚨🚨 CRITICAL: Unknown person loitering at {camera_name} for 10+ MINUTES"
+        severity: "critical"
+        snapshot: true
+
+# Variables (used for message templates)
+variables:
+  camera_name:
+    from_context: "camera_id"
+    mapping:
+      "1": "Front Door"
+      "2": "Side Door"
+      "3": "Driveway"

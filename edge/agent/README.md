@@ -65,5 +65,7 @@ Edit `config.yaml` to configure:
 
 ## See Also
 
-- `docs/EDGE_IMAGE_SERVING.md` - Image serving architecture
-- `central/policy-server/` - Policy server
+- **[docs/TWO_LAYER_ARCHITECTURE.md](../../docs/TWO_LAYER_ARCHITECTURE.md)** ⭐ - Edge/Policy layer separation explained
+- **[docs/guides/EDGE_DEVICES_GUIDE.md](../../docs/guides/EDGE_DEVICES_GUIDE.md)** - Image serving architecture options
+- **[central/policy-server/](../../central/policy-server/)** - Policy server setup
+- **[docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md)** - Full system architecture

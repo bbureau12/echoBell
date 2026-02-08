@@ -1,7 +1,7 @@
 # EchoBell Architecture
 
-**Document Version**: 1.3  
-**Last Updated**: February 2, 2026  
+**Document Version**: 1.5  
+**Last Updated**: February 8, 2026  
 **Branch**: policylayer
 
 ---
@@ -9,16 +9,18 @@
 ## Table of Contents
 
 1. [System Overview](#system-overview)
-2. [Core Architecture](#core-architecture)
-3. [Data Flow](#data-flow)
-4. [Module Breakdown](#module-breakdown)
-5. [Key Design Patterns](#key-design-patterns)
-6. [Database Schema](#database-schema)
-7. [Configuration System](#configuration-system)
-8. [Integrations](#integrations)
+2. [Two-Layer Architecture](#two-layer-architecture) ⭐ NEW
+3. [Core Architecture](#core-architecture)
+4. [Data Flow](#data-flow)
+5. [Module Breakdown](#module-breakdown)
+6. [Key Design Patterns](#key-design-patterns)
+7. [Database Schema](#database-schema)
+8. [Watch System](#watch-system) ⭐ NEW
+9. [Configuration System](#configuration-system)
+10. [Integrations](#integrations)
    - [Telegram Notifications](#telegram-notifications)
    - [Voice Command Integration (Echonet)](#voice-command-integration-echonet)
-9. [Testing & Development](#testing--development)
+11. [Testing & Development](#testing--development)
 
 ---
 
@@ -44,6 +46,44 @@ EchoBell is a privacy-focused, multimodal doorbell intelligence system that:
 5. **Stateful tracking**: Scene awareness persists across frames/events
 6. **Separation of concerns**: Clear boundaries between perception, classification, storage
 7. **Bidirectional voice**: LLM can both receive and request voice input from users
+8. **Two-layer separation**: Edge devices observe, policy server decides
+
+---
+
+## Two-Layer Architecture
+
+EchoBell uses a **distributed two-layer architecture** that separates sensing from decision-making:
+
+### Layer 1: Edge Device Layer (Perception/Sensing)
+- **What**: Physical cameras, doorbells, sensors
+- **Where**: `edge/agent/`, `packages/perception/`
+- **Does**: YOLO detection, OCR, face recognition, audio capture
+- **Sends**: Structured observations (objects, evidence) to policy server
+- **Does NOT**: Make trust decisions, track scene state, evaluate policies
+
+### Layer 2: Policy/Decision Layer (Central Intelligence)
+- **What**: Centralized decision engine
+- **Where**: `central/policy-server/`, `packages/policy/`, `packages/scene/`
+- **Does**: Scene tracking, trust evaluation, policy rules, action execution
+- **Receives**: Observations from multiple edge devices
+- **Does NOT**: Capture images, run ML models, access cameras directly
+
+### Communication Flow
+```
+Edge Device (Camera 1) ──┐
+                         ├──> Policy Server ──> Decisions/Actions
+Edge Device (Camera 2) ──┘    (Centralized)
+```
+
+**📖 For detailed documentation, see: [TWO_LAYER_ARCHITECTURE.md](TWO_LAYER_ARCHITECTURE.md)**
+
+This document covers:
+- Why two layers? (scalability, privacy, maintainability)
+- What each layer does and doesn't do
+- Communication protocol (edge → policy → actions)
+- Deployment topologies (single device, multi-camera, cloud)
+- Complete data flow examples
+- Configuration and troubleshooting
 
 ---
 
@@ -746,6 +786,7 @@ class MyActionHandler:
    - `speak` - Text-to-speech announcement
    - `webhook` - HTTP request (GET/POST/PUT) to external services
    - `log` - Console logging (for debugging)
+   - `create_watch` - Schedule deferred policy evaluation (see [Watch System](#watch-system))
 
 4. **Helper Functions**:
    - `substitute_variables(text, vars)` - Replace `{placeholders}`
@@ -954,6 +995,23 @@ actions:
 
 3. **Escalation Patterns**:
    ```yaml
+   # Modern approach: Use Watch System (recommended)
+   # See Watch System section and examples/loitering_watch_policy.yaml
+   - id: unknown_person_initial
+     conditions:
+       - person_entered + unknown_trust
+     actions:
+       - create_watch: {watch_type: "loitering_2min", due_in_seconds: 120}
+   
+   - id: unknown_person_2min
+     conditions:
+       - watch_triggered: "loitering_2min"
+       - person_still_present
+     actions:
+       - telegram: "Person loitering 2+ min"
+       - create_watch: {watch_type: "loitering_5min", due_in_seconds: 180}
+   
+   # Legacy approach: Use alert_history (still supported)
    # First alert
    - id: loitering_initial
      conditions:
@@ -1425,6 +1483,41 @@ if recent_alert:
     send_urgent_alert()
 ```
 
+#### `watches`
+Deferred policy evaluation system for time-based alerts and escalation chains.
+
+```sql
+CREATE TABLE watches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    watch_type TEXT NOT NULL,              -- Free-form type (e.g., "loitering_2min")
+    watch_key TEXT NOT NULL UNIQUE,        -- Dedup key: cam{id}:track_{key}:{type}
+    camera_id INTEGER,
+    scene_track_id INTEGER,                -- NULL for one-shot watches
+    event_id TEXT,                         -- Optional link to visitor_event
+    created_ts INTEGER NOT NULL,
+    due_ts INTEGER NOT NULL,               -- When to evaluate
+    evaluated_ts INTEGER,                  -- When evaluation occurred
+    expires_ts INTEGER NOT NULL,           -- When to auto-expire
+    state TEXT NOT NULL DEFAULT 'ARMED',   -- ARMED, TRIGGERED, DISARMED, EXPIRED
+    context_json TEXT,                     -- Free-form JSON context
+    trigger_reason TEXT,                   -- Why watch fired/disarmed
+    created_by_policy_id TEXT,             -- Policy that created watch
+    last_updated_ts INTEGER NOT NULL,
+    FOREIGN KEY(camera_id) REFERENCES camera(id),
+    FOREIGN KEY(scene_track_id) REFERENCES scene_tracks(id),
+    CHECK(due_ts > created_ts),
+    CHECK(expires_ts >= due_ts)
+);
+```
+
+**Watch States**:
+- `ARMED`: Waiting for due_ts
+- `TRIGGERED`: Evaluated and fired policy action
+- `DISARMED`: Track became inactive before due_ts
+- `EXPIRED`: Reached expires_ts without evaluation
+
+**Usage**: See [Watch System](#watch-system) section and `examples/WATCH_SYSTEM.md`
+
 ### Indexes
 
 ```sql
@@ -1435,7 +1528,398 @@ CREATE INDEX idx_scene_tracks_camera_active ON scene_tracks(camera_id, active);
 CREATE INDEX idx_scene_tracks_type ON scene_tracks(track_type);
 CREATE INDEX idx_alert_history_track_time ON alert_history(track_key, track_type, sent_ts DESC);
 CREATE INDEX idx_trusted_plates_enabled ON trusted_plates(enabled);
+CREATE INDEX idx_watches_state_due ON watches(state, due_ts);
+CREATE INDEX idx_watches_track ON watches(scene_track_id);
+CREATE INDEX idx_watches_camera ON watches(camera_id, state);
 ```
+
+---
+
+## Watch System
+
+The **Watch System** enables time-based policy evaluation with progressive escalation chains. Watches are deferred policy evaluations that trigger when a future time is reached.
+
+### Overview
+
+**Problem**: Traditional policies evaluate immediately when evidence appears. How do you alert on "person loitering for 2+ minutes" without constantly re-checking?
+
+**Solution**: Create a **watch** that schedules future policy evaluation. When the watch becomes "due", the system re-evaluates policies with watch-specific evidence.
+
+### Architecture
+
+```
+┌────────────┐
+│  Detection │ person_entered (unknown)
+│   Event    │
+└─────┬──────┘
+      │ Policy evaluates
+      ▼
+┌────────────┐
+│   Policy   │ Condition: person_entered + unknown
+│  Evaluator │ Action: create_watch
+└─────┬──────┘
+      │ Creates watch
+      ▼
+┌────────────┐
+│   Watch    │ INSERT INTO watches
+│  Service   │ (due_ts = now + 120 seconds)
+└─────┬──────┘
+      │
+      │ ... 2 minutes pass ...
+      ▼
+┌────────────┐
+│   Watch    │ Background worker polls
+│   Worker   │ SELECT * WHERE due_ts <= now
+└─────┬──────┘
+      │ Finds due watch
+      ▼
+┌────────────┐
+│   Watch    │ Re-evaluates policies with
+│  Evaluator │ watch evidence injected
+└─────┬──────┘
+      │ Evidence: source="watch", value="loitering_2min"
+      ▼
+┌────────────┐
+│   Policy   │ Condition: watch_triggered + person_present
+│  Evaluator │ Action: telegram alert
+└────────────┘
+```
+
+### Core Concepts
+
+**Watch**: A scheduled policy re-evaluation
+- **watch_type**: Free-form identifier (e.g., "loitering_2min", "delivery_expected")
+- **watch_key**: Unique deduplication key (auto-generated: `cam{id}:track_{key}:{type}`)
+- **due_ts**: When to evaluate (Unix timestamp)
+- **expires_ts**: When to discard if not evaluated
+- **state**: ARMED → TRIGGERED/DISARMED/EXPIRED
+
+**Escalation Chain**: Watches creating watches for progressive alerts
+```
+person_enters → 2min watch → alert + 5min watch → alert + 10min watch → critical alert
+```
+
+**One-Shot Watch**: Watch without scene_track_id (schedule-based, not detection-based)
+```yaml
+# Example: Delivery expectation reminder
+- create_watch:
+    watch_type: "delivery_expected"
+    due_in_seconds: 3600  # 1 hour
+    # No scene_track_id - independent of detections
+```
+
+### Components
+
+#### WatchService (`packages/policy/watch_service.py`)
+
+CRUD operations for watches:
+
+```python
+from packages.policy.watch_service import WatchService, WatchState
+
+service = WatchService(db_path="data/echoBell.db")
+
+# Create watch
+watch = service.create_watch(
+    conn=conn,
+    watch_type="loitering_2min",
+    camera_id=1,
+    scene_track_id=track_id,
+    due_in_seconds=120,
+    expires_in_seconds=300,
+    context={"severity": "medium"}
+)
+
+# Get due watches
+due_watches = service.get_due_watches(conn, now_ts=int(time.time()))
+
+# Mark triggered
+service.mark_triggered(conn, watch_id, trigger_reason="policy_matched")
+
+# Auto-disarm on track inactive
+service.disarm_watches_for_inactive_track(conn, scene_track_id)
+
+# Expire old watches
+expired_count = service.expire_old_watches(conn, now_ts=int(time.time()))
+
+# Cleanup soft-deleted (30+ days old)
+deleted_count = service.cleanup_old_watches(conn, days_old=30)
+```
+
+#### WatchWorker (`packages/policy/watch_worker.py`)
+
+Background async worker that polls for due watches:
+
+```python
+from packages.policy.watch_worker import WatchWorker
+
+# Initialize (auto-starts with policy server)
+worker = WatchWorker(
+    db_path="data/echoBell.db",
+    poll_interval_seconds=5  # Check every 5 seconds
+)
+
+await worker.start()  # Starts background task
+# ... worker runs continuously ...
+await worker.stop()   # Graceful shutdown
+```
+
+**Worker Loop**:
+1. Every N seconds: `SELECT * FROM watches WHERE due_ts <= ? AND state = 'ARMED'`
+2. For each due watch:
+   - Check if scene_track is still active (if linked)
+   - If inactive → mark DISARMED
+   - If active → inject watch evidence and re-evaluate policies
+   - If policy matches → mark TRIGGERED
+3. Expire watches past expires_ts
+4. Cleanup soft-deleted watches (30+ days)
+
+#### CreateWatchActionHandler (`packages/policy/actions/create_watch_handler.py`)
+
+Policy action handler for creating watches:
+
+```python
+# In policy YAML:
+actions:
+  - type: create_watch
+    watch_type: "loitering_2min"
+    due_in_seconds: 120
+    expires_in_seconds: 300
+    context:
+      severity: "medium"
+```
+
+**Auto-generated watch_key**:
+```python
+# Format: cam{camera_id}:track_{track_key}:{watch_type}
+# Example: cam1:track_person_abc123:loitering_2min
+```
+
+**Deduplication**: Same track + same watch_type won't create duplicate watches
+
+### Example Policies
+
+#### Loitering Detection (4-level escalation)
+
+```yaml
+# Step 1: Initial detection → 2min watch
+- id: unknown_person_initial
+  conditions:
+    all:
+      - evidence_exists: {source: "scene", feature: "person_entered"}
+      - trust_check: {level: "unknown"}
+  actions:
+    - type: create_watch
+      watch_type: "loitering_2min"
+      due_in_seconds: 120
+
+# Step 2: 2min fires → alert + 5min watch
+- id: unknown_person_2min
+  conditions:
+    all:
+      - evidence_exists: {source: "watch", feature: "triggered", value: "loitering_2min"}
+      - evidence_exists: {source: "scene", feature: "person_present"}
+      - track_duration_gt: 120
+  actions:
+    - type: telegram
+      message: "⚠️ Person loitering 2+ minutes"
+    - type: create_watch
+      watch_type: "loitering_5min"
+      due_in_seconds: 180
+
+# Step 3: 5min fires → escalated alert + 10min watch
+- id: unknown_person_5min
+  conditions:
+    all:
+      - evidence_exists: {source: "watch", value: "loitering_5min"}
+      - evidence_exists: {source: "scene", feature: "person_present"}
+  actions:
+    - type: telegram
+      message: "🚨 ESCALATED: Person loitering 5+ minutes"
+    - type: create_watch
+      watch_type: "loitering_10min"
+      due_in_seconds: 300
+
+# Step 4: 10min fires → critical alert
+- id: unknown_person_10min
+  conditions:
+    all:
+      - evidence_exists: {source: "watch", value: "loitering_10min"}
+      - evidence_exists: {source: "scene", feature: "person_present"}
+  actions:
+    - type: telegram
+      message: "🚨🚨 CRITICAL: Person loitering 10+ MINUTES"
+```
+
+**See** `examples/loitering_watch_policy.yaml` for complete example
+
+#### Vehicle Dwell Time (trust-based)
+
+```yaml
+# Unknown vehicle → 5min watch
+- id: unknown_vehicle_initial
+  conditions:
+    - vehicle_stopped + trust_level:unknown
+  actions:
+    - create_watch: {watch_type: "vehicle_dwell_5min", due: 300}
+
+# Distrusted vehicle → immediate alert + 2min watch
+- id: distrusted_vehicle_alert
+  conditions:
+    - vehicle_entered + trust_level:distrust
+  actions:
+    - telegram: "⚠️ DISTRUSTED vehicle detected"
+    - create_watch: {watch_type: "distrusted_vehicle_2min", due: 120}
+```
+
+**See** `examples/vehicle_dwell_watch_policy.yaml` for complete example
+
+### Admin API Endpoints
+
+Policy server exposes watch management endpoints:
+
+```bash
+# List all watches
+GET /admin/watches
+GET /admin/watches?state=ARMED
+GET /admin/watches?camera_id=1
+
+# Get due watches
+GET /admin/watches/due
+
+# Get specific watch
+GET /admin/watches/{id}
+
+# Get watches for track
+GET /admin/watches/track/{scene_track_id}
+
+# Create watch (manual testing)
+POST /admin/watches
+{
+  "watch_type": "test_watch",
+  "camera_id": 1,
+  "due_in_seconds": 60,
+  "context": {"test": true}
+}
+
+# Trigger cleanup
+POST /admin/watches/cleanup
+
+# Health check (includes worker status)
+GET /health
+# Returns: {"status": "healthy", "watch_worker": "running"}
+```
+
+### Best Practices
+
+#### ⏱️ Timing
+- **Short durations** (1-2 min): Initial alerts
+- **Longer intervals** (5-10 min): Escalations
+- **Expiration**: Set 2-5x longer than due_in_seconds to handle delays
+
+```yaml
+# ✅ Good: Progressive escalation with buffer
+- create_watch:
+    due_in_seconds: 120      # 2 minutes
+    expires_in_seconds: 600  # 10 minutes (5x buffer)
+
+# ❌ Bad: Expiration too soon
+- create_watch:
+    due_in_seconds: 120
+    expires_in_seconds: 130  # Only 10 seconds buffer!
+```
+
+#### 🔑 Watch Keys
+- Let system auto-generate for track-based watches
+- Explicit keys only for one-shot watches (no scene_track_id)
+
+```yaml
+# ✅ Auto-generated key (track-based)
+- create_watch:
+    watch_type: "loitering_2min"
+    # System generates: cam1:track_person_abc:loitering_2min
+
+# ✅ Explicit key (one-shot)
+- create_watch:
+    watch_type: "delivery_expected"
+    watch_key: "delivery_2024-02-08_morning"
+
+# ❌ Manual key for track (won't deduplicate correctly)
+- create_watch:
+    watch_key: "custom_key_123"  # Don't do this!
+```
+
+#### 📊 Escalation Chains
+- Each level creates next watch (allows progression)
+- Verify duration with `track_duration_gt` condition
+
+```yaml
+# ✅ Good: Chain with duration verification
+- id: level_2
+  conditions:
+    - watch_triggered: "alert_2min"
+    - track_duration_gt: 120  # Verify actually 2+ min
+  actions:
+    - telegram: "Alert"
+    - create_watch: {type: "alert_5min", due: 180}
+
+# ❌ Bad: No duration check (false positives)
+- id: level_2
+  conditions:
+    - watch_triggered: "alert_2min"
+    # Missing verification - could fire if person left & returned
+```
+
+#### 🧹 Lifecycle Management
+- Track-linked watches auto-disarm when track inactive
+- Watches auto-expire when expires_ts reached
+- Soft-deleted watches purged after 30 days
+- Monitor with `/health` endpoint
+
+### Performance
+
+**Worker Poll Interval**:
+- **5-10 seconds**: Good balance for most use cases
+- **1-2 seconds**: High-frequency alerts (increases CPU)
+- **30-60 seconds**: Low-priority background checks
+
+**Database Impact**:
+- Single indexed query per poll: `SELECT * WHERE state='ARMED' AND due_ts <= ?`
+- Indexes on `(state, due_ts)` ensure fast lookup
+- Typical load: <100 watches/hour = negligible impact
+
+**Scalability**:
+- Tested with 1000+ active watches
+- Worker handles 100+ due watches per cycle
+- Auto-cleanup prevents table bloat
+
+### Troubleshooting
+
+**Watch not firing?**
+1. Check if watch exists: `SELECT * FROM watches WHERE watch_type = ?`
+2. Verify worker running: `GET /health` → `"watch_worker": "running"`
+3. Check due time: `SELECT datetime(due_ts, 'unixepoch') FROM watches WHERE id = ?`
+4. Review policy conditions: Does watch evidence match?
+
+**Watch fires but no action?**
+1. Verify policy conditions match watch evidence
+2. Check if track is still active (for track-linked watches)
+3. Review policy execution logs
+
+**Duplicate watches?**
+- Watch keys prevent duplicates automatically
+- Same `cam_id:track_key:watch_type` → only one watch created
+
+### See Also
+
+- **examples/WATCH_SYSTEM.md** - Comprehensive guide with examples
+- **examples/loitering_watch_policy.yaml** - Person loitering escalation
+- **examples/vehicle_dwell_watch_policy.yaml** - Vehicle parking monitoring
+- **examples/delivery_timeout_watch_policy.yaml** - Delivery expectation tracking
+- **tests/test_watch_system.py** - Test examples
+- **packages/policy/watch_service.py** - Implementation
+- **packages/policy/watch_worker.py** - Background worker
+- **infra/db/migrations/020_add_watches.sql** - Database schema
 
 ---
 
@@ -1826,7 +2310,7 @@ Folder name becomes expected intent for validation.
 
 **Condition**: Boolean expression evaluated against evidence (e.g., `evidence_exists`, `time_between`)
 
-**Action**: Executable response when policy conditions match (telegram, speak, webhook)
+**Action**: Executable response when policy conditions match (telegram, speak, webhook, create_watch)
 
 **HMAC**: Hash-based Message Authentication Code (privacy-safe plate identifier)
 
@@ -1840,7 +2324,9 @@ Folder name becomes expected intent for validation.
 
 **Trust**: System for identifying known vehicles (plates) and people (faces) for policy decisions
 
-**Escalation**: Policy pattern where repeated conditions trigger increasingly urgent actions
+**Watch**: Scheduled future policy evaluation for time-based alerts and escalation chains
+
+**Escalation**: Policy pattern where repeated conditions trigger increasingly urgent actions (often implemented via watches)
 
 ---
 

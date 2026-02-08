@@ -1,0 +1,72 @@
+# Example Policy: Delivery Package Timeout
+#
+# Scenario: User expects a delivery during a time window.
+# If no delivery person shows up within the window, send reminder.
+#
+# This demonstrates:
+# - One-shot watches (no scene_track_id)
+# - Time-based reminders independent of detection events
+# - Watch expiration (if delivery happens early, watch becomes irrelevant)
+
+policies:
+  # Policy 1: User creates delivery expectation
+  # (This would be triggered by user via admin API, not shown here)
+  # The watch would be created manually or via scheduled event
+  
+  # Policy 2: Watch fires if no delivery person detected
+  - id: delivery_timeout_reminder
+    name: "Delivery Timeout Reminder"
+    description: "Remind user that expected delivery hasn't arrived"
+    enabled: true
+    priority: 50
+    
+    conditions:
+      all:
+        - evidence_exists:
+            source: "watch"
+            feature: "triggered"
+            value: "delivery_expected"
+        # No delivery person detected in the last hour
+        - not:
+            evidence_exists:
+              source: "scene"
+              feature: "person_entered"
+              classification: "delivery"
+              within_minutes: 60
+    
+    actions:
+      - type: telegram
+        message: "📦 Reminder: Expected delivery hasn't arrived at {expected_time}"
+        severity: "info"
+      
+      - type: create_watch
+        watch_type: "delivery_final_reminder"
+        due_in_seconds: 3600  # Check again in 1 hour
+        expires_in_seconds: 7200
+        context:
+          reminder_count: 2
+  
+  # Policy 3: Delivery person detected - cancel all watches
+  - id: delivery_person_arrived
+    name: "Delivery Person Arrived"
+    description: "Cancel all delivery watches when delivery person detected"
+    enabled: true
+    priority: 100  # High priority
+    
+    conditions:
+      all:
+        - evidence_exists:
+            source: "scene"
+            feature: "person_entered"
+        - classification_check:
+            type: "delivery"
+            confidence_gt: 0.6
+    
+    actions:
+      - type: telegram
+        message: "📦 Delivery person detected at {camera_name}"
+        severity: "info"
+        snapshot: true
+      
+      # Note: In real implementation, we'd need a "cancel_watches" action
+      # For now, the watch will auto-expire or be manually cleaned up
