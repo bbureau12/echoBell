@@ -496,7 +496,8 @@ class PolicyEvaluator:
             
             # Create variable names like: vehicle_color, plate_text, intent, etc.
             # Map common evidence features to variable names
-            if feature in ['color', 'vehicle_type', 'plate_text', 'intent', 'confidence', 'visitor_id']:
+            if feature in ['color', 'vehicle_type', 'plate_text', 'intent', 'confidence', 'visitor_id', 
+                          'latest_frame_path', 'vehicle_color', 'person_name']:
                 resolved[feature] = str(value)
             
             # Also create source_feature combo (e.g., vision_color, ocr_plate_text)
@@ -507,6 +508,13 @@ class PolicyEvaluator:
         for key, value in context.items():
             if isinstance(value, (str, int, float)):
                 resolved[key] = str(value)
+        
+        # Debug logging
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[POLICY] Resolved variables: {list(resolved.keys())}")
+        if 'latest_frame_path' in resolved:
+            logger.info(f"[POLICY] latest_frame_path = {resolved['latest_frame_path']}")
         
         # Then apply explicit variable definitions from policy/config
         for var_name, var_def in self.variable_defs.items():

@@ -164,7 +164,7 @@ class WatchWorker:
         # Check if scene track is still active (if watch is track-based)
         if watch.scene_track_id:
             cursor = conn.execute(
-                "SELECT active, track_key, first_seen_ts FROM scene_tracks WHERE id = ?",
+                "SELECT active, track_key, first_seen_ts, track_type FROM scene_tracks WHERE id = ?",
                 (watch.scene_track_id,)
             )
             row = cursor.fetchone()
@@ -184,9 +184,11 @@ class WatchWorker:
             
             track_key = row[1]
             first_seen_ts = row[2]
+            track_type = row[3]
         else:
             track_key = None
             first_seen_ts = None
+            track_type = None
         
         # Build evidence context from current scene state
         evidence = await self._build_watch_evidence(conn, watch, track_key, first_seen_ts)
@@ -209,6 +211,12 @@ class WatchWorker:
             'watch_type': watch.watch_type,
             'timestamp': now,
         }
+        
+        # Add track_key and track_type for alert history checks
+        if track_key:
+            context['track_key'] = track_key
+        if track_type:
+            context['track_type'] = track_type
         
         # Add track duration if applicable
         if first_seen_ts:

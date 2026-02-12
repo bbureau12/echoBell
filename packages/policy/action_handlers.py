@@ -236,6 +236,10 @@ class TelegramActionHandler:
         send_photo = action.get('send_photo', False)
         photo_path = action.get('photo_path')
         
+        # Substitute variables in photo_path if provided
+        if photo_path:
+            photo_path = substitute_variables(photo_path, variables)
+        
         # Load Telegram config
         config = load_telegram_config()
         if not config or not config.enabled:
@@ -253,8 +257,36 @@ class TelegramActionHandler:
         
         try:
             if send_photo and photo_path:
+                logger.info(f"[TELEGRAM] Attempting to send photo: {photo_path}")
+                
+                # Check if file exists
+                import os
+                if not os.path.exists(photo_path):
+                    # Try with absolute path
+                    abs_path = os.path.abspath(photo_path)
+                    if os.path.exists(abs_path):
+                        logger.info(f"[TELEGRAM] Using absolute path: {abs_path}")
+                        photo_path = abs_path
+                    else:
+                        error_msg = f"Photo file not found: {photo_path} (also tried {abs_path})"
+                        logger.error(f"[TELEGRAM] {error_msg}")
+                        return {
+                            'action_type': 'telegram',
+                            'success': False,
+                            'error': error_msg,
+                            'message': message
+                        }
+                
+                logger.info(f"[TELEGRAM] Sending photo with caption: {message[:50]}...")
                 success = notifier.send_photo(photo_path, caption=message)
+                
+                if success:
+                    logger.info(f"[TELEGRAM] ✓ Photo sent successfully")
+                else:
+                    logger.warning(f"[TELEGRAM] ✗ Photo send returned False")
             else:
+                if send_photo:
+                    logger.warning(f"[TELEGRAM] send_photo=True but no photo_path provided")
                 success = notifier.send_message(message)
             
             if not success:
