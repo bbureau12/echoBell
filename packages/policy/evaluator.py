@@ -504,7 +504,7 @@ class PolicyEvaluator:
             var_name = f"{source}_{feature}"
             resolved[var_name] = str(value)
         
-        # Add context variables (camera_id, track_key, etc.)
+        # Add context variables (camera_id, track_key, snapshot_path, snapshot_url, etc.)
         for key, value in context.items():
             if isinstance(value, (str, int, float)):
                 resolved[key] = str(value)

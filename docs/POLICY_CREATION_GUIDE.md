@@ -402,15 +402,33 @@ Send a message to Telegram (with optional photo).
   "message": "Your message with {variables}",
   "priority": "normal",           // Optional: "low", "normal", "urgent"
   "send_photo": true,              // Optional: attach a photo
-  "photo_path": "{latest_frame_path}"  // Required if send_photo=true
+  "photo_path": "{snapshot_path}"  // Required if send_photo=true
 }
 ```
 
+**Photo Path in Production vs Testing:**
+
+In **production** with edge devices:
+- Edge agent captures frame and saves locally (e.g., `/edge/images/cam1_123456.jpg`)
+- Edge agent starts HTTP server to serve images
+- Edge sends `snapshot_url` in request: `"http://192.168.1.100:8080/cam1_123456.jpg"`
+- Policy server should download image before sending to Telegram
+- Use `{snapshot_url}` variable in policy *(implementation needed)*
+
+In **testing** (same machine):
+- Test script includes local file path in context
+- Policy can access file directly
+- Use `{snapshot_path}` variable from context
+
+**Current Implementation:**
+- Policies use `{snapshot_path}` from request context
+- Works for single-machine testing
+- **TODO**: Add snapshot URL download support for distributed edge devices
+
 **Photo Requirements:**
-- `photo_path` must resolve to an existing file
-- Use `{latest_frame_path}` variable from evidence
 - Supported formats: JPG, PNG
-- Path is relative to server working directory (or use absolute path)
+- Max size: 10MB (Telegram limit)
+- File must be readable by policy server process
 
 **Example: Text Only**
 ```json
@@ -421,13 +439,13 @@ Send a message to Telegram (with optional photo).
 }
 ```
 
-**Example: With Photo**
+**Example: With Photo (Testing)**
 ```json
 {
   "type": "telegram",
   "message": "🚗 Vehicle on Camera {camera_id}",
   "send_photo": true,
-  "photo_path": "{latest_frame_path}"
+  "photo_path": "{snapshot_path}"  // From request context
 }
 ```
 
@@ -669,41 +687,48 @@ import asyncio
 import time
 from packages.policy.apply import evaluate_policies
 
-# Define test evidence
+# Define test evidence (matches what vision.py produces)
 evidence = [
+    # Scene-level evidence
     {
         'source': 'vision',
         'feature': 'vehicle_present',
         'value': 'true',
-        'conf': 0.95
+        'conf': 0.95,
+        'object_id': None  # Scene-level
     },
+    # Object-level evidence (from YOLO detection)
     {
         'source': 'vision',
-        'feature': 'vehicle_color',
-        'value': 'white',
-        'conf': 0.85
+        'feature': 'class',
+        'value': 'vehicle',
+        'conf': 0.95,
+        'object_id': 1
     },
     {
         'source': 'vision',
         'feature': 'vehicle_type',
-        'value': 'sedan',
-        'conf': 0.90
+        'value': 'car',  # raw_class from YOLO
+        'conf': 0.90,
+        'object_id': 1
     },
     {
         'source': 'vision',
-        'feature': 'latest_frame_path',
-        'value': 'data/edge_images/test_image.jpg',
-        'conf': 1.0
+        'feature': 'color',
+        'value': 'white',
+        'conf': 0.60,  # Color detection is less confident
+        'object_id': 1
     }
 ]
 
-# Define context
+# Define context (from edge agent)
 context = {
     'camera_id': 1,
     'track_key': 'test_vehicle_123',
     'track_type': 'vehicle',
     'event_id': 'test_event_001',
-    'timestamp': int(time.time())
+    'timestamp': int(time.time()),
+    'snapshot_path': 'data/edge_images/test_image.jpg'  # For photo policies
 }
 
 # Run evaluation
@@ -777,6 +802,7 @@ def send_test_evidence():
     """Send test vehicle evidence to policy API"""
     
     # Construct full evidence payload
+    # NOTE: In production, the edge agent sends this automatically
     payload = {
         'camera_id': 1,
         'event_id': f'test_evt_{int(time.time())}',
@@ -788,7 +814,8 @@ def send_test_evidence():
             'props': {
                 'scene_track_key': 'vehicle_test_123',
                 'vehicle_color': 'white',
-                'vehicle_type': 'sedan'
+                'vehicle_type': 'sedan',
+                'raw_class': 'car'
             }
         }],
         'evidence': [
@@ -797,31 +824,41 @@ def send_test_evidence():
                 'feature': 'vehicle_present',
                 'value': 'true',
                 'conf': 0.95,
-                'object_id': 1
+                'object_id': None  # Scene-level evidence
             },
             {
                 'source': 'vision',
-                'feature': 'vehicle_color',
-                'value': 'white',
-                'conf': 0.85,
-                'object_id': 1
+                'feature': 'class',
+                'value': 'vehicle',
+                'conf': 0.95,
+                'object_id': 1  # Object-level evidence
             },
             {
                 'source': 'vision',
                 'feature': 'vehicle_type',
-                'value': 'sedan',
+                'value': 'car',
                 'conf': 0.90,
                 'object_id': 1
             },
             {
                 'source': 'vision',
-                'feature': 'latest_frame_path',
-                'value': 'data/edge_images/test_frame.jpg',
-                'conf': 1.0,
+                'feature': 'color',
+                'value': 'white',
+                'conf': 0.60,
                 'object_id': 1
             }
         ]
     }
+    
+    # **IMPORTANT**: Photo path handling
+    # In production, the edge agent includes a snapshot_url in the request:
+    #   payload["snapshot_url"] = "http://edge-device:8080/cam1_123456.jpg"
+    # The policy server would need to download this image first.
+    # 
+    # For testing, we simulate a local image file instead:
+    if 'context' not in payload:
+        payload['context'] = {}
+    payload['context']['snapshot_path'] = 'data/edge_images/test_frame.jpg'
     
     # Send request
     try:
@@ -849,32 +886,58 @@ python examples/send_test_request.py
 ```
 
 **Option B: Direct curl/PowerShell**
+
+This example shows a realistic payload similar to what the **edge agent** sends:
+
 ```powershell
-# PowerShell
+# PowerShell - Simulates edge agent request
 $body = @{
     camera_id = 1
-    event_id = "test_001"
+    event_id = "evt_$(Get-Date -UFormat %s)_1"
     timestamp = [int][double]::Parse((Get-Date -UFormat %s))
+    event_type = "detection"
+    
+    # Objects detected by YOLO vision
     objects = @(
         @{
             object_id = 1
             label = "vehicle"
             bbox = @(100, 200, 400, 400)
+            confidence = 0.95
             props = @{
-                vehicle_color = "white"
-                vehicle_type = "sedan"
+                raw_class = "car"        # Original YOLO class
+                color = "white"          # Detected color
+                conf = 0.95
             }
         }
     )
+    
+    # Evidence from vision system (automatically generated)
     evidence = @(
-        @{source = "vision"; feature = "vehicle_present"; value = "true"; conf = 0.95},
-        @{source = "vision"; feature = "vehicle_color"; value = "white"; conf = 0.85},
-        @{source = "vision"; feature = "latest_frame_path"; value = "data/edge_images/test.jpg"; conf = 1.0}
+        # Scene-level evidence (object_id=null)
+        @{source = "vision"; feature = "vehicle_present"; value = "true"; conf = 0.95; object_id = $null},
+        
+        # Object-level evidence
+        @{source = "vision"; feature = "class"; value = "vehicle"; conf = 0.95; object_id = 1},
+        @{source = "vision"; feature = "vehicle_type"; value = "car"; conf = 0.90; object_id = 1},
+        @{source = "vision"; feature = "color"; value = "white"; conf = 0.60; object_id = 1}
     )
+    
+    # Context from edge agent
+    context = @{
+        mode = "passive"              # "doorbell" or "passive"
+        person_present = $false
+        vehicle_present = $true
+        source = "camera_1"
+        snapshot_path = "data/edge_images/test_frame.jpg"  # For testing (same machine)
+        # snapshot_url = "http://192.168.1.100:8080/cam1_123456.jpg"  # Production (edge device)
+    }
 } | ConvertTo-Json -Depth 10
 
 Invoke-RestMethod -Uri "http://localhost:8000/evidence" -Method POST -Body $body -ContentType "application/json"
 ```
+
+**Note:** The edge agent does NOT send `latest_frame_path` as evidence. It sends `snapshot_path` in the context or `snapshot_url` for remote edge devices.
 
 #### Step 3: Check Server Logs
 

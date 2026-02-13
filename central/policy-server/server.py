@@ -900,6 +900,12 @@ async def receive_evidence(request: ObservationRequest):
                     'timestamp': request.timestamp
                 }
                 
+                # Add context from request (snapshot_url, snapshot_path, etc.)
+                if request.context:
+                    for key, value in request.context.items():
+                        if key not in context:  # Don't override existing keys
+                            context[key] = value
+                
                 # Add track context if available
                 if request.objects:
                     first_obj = request.objects[0]

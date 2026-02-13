@@ -240,6 +240,16 @@ class TelegramActionHandler:
         if photo_path:
             photo_path = substitute_variables(photo_path, variables)
         
+        # If no photo_path but snapshot_url available, use it
+        # (Edge device scenario - context has snapshot_url from edge image server)
+        if not photo_path and send_photo:
+            if 'snapshot_url' in variables:
+                photo_path = variables['snapshot_url']
+                logger.info(f"[TELEGRAM] Using snapshot_url from context: {photo_path}")
+            elif 'snapshot_path' in variables:
+                photo_path = variables['snapshot_path']
+                logger.info(f"[TELEGRAM] Using snapshot_path from context: {photo_path}")
+        
         # Load Telegram config
         config = load_telegram_config()
         if not config or not config.enabled:
@@ -259,16 +269,66 @@ class TelegramActionHandler:
             if send_photo and photo_path:
                 logger.info(f"[TELEGRAM] Attempting to send photo: {photo_path}")
                 
-                # Check if file exists
+                # Check if photo_path is a URL
                 import os
-                if not os.path.exists(photo_path):
+                import tempfile
+                import requests
+                from pathlib import Path
+                
+                local_photo_path = photo_path
+                temp_file = None
+                
+                if photo_path.startswith(('http://', 'https://')):
+                    # Download image from URL
+                    logger.info(f"[TELEGRAM] Downloading image from URL: {photo_path}")
+                    try:
+                        # Add X-API-Key header for edge device authentication
+                        # TODO: Make this configurable per edge device
+                        headers = {
+                            'X-API-Key': 'dontgiveitupluffy'  # Dev/test API key
+                        }
+                        
+                        response = requests.get(photo_path, timeout=10, headers=headers)
+                        response.raise_for_status()
+                        
+                        # Create downloaded images directory
+                        download_dir = Path("data/downloaded_images")
+                        download_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        # Generate temp filename from URL or use timestamp
+                        import time
+                        filename = os.path.basename(photo_path.split('?')[0])  # Remove query params
+                        if not filename or '.' not in filename:
+                            filename = f"download_{int(time.time())}.jpg"
+                        
+                        temp_file = download_dir / filename
+                        
+                        # Save downloaded image
+                        with open(temp_file, 'wb') as f:
+                            f.write(response.content)
+                        
+                        local_photo_path = str(temp_file)
+                        logger.info(f"[TELEGRAM] Downloaded to: {local_photo_path}")
+                        
+                    except requests.RequestException as e:
+                        error_msg = f"Failed to download image from {photo_path}: {e}"
+                        logger.error(f"[TELEGRAM] {error_msg}")
+                        return {
+                            'action_type': 'telegram',
+                            'success': False,
+                            'error': error_msg,
+                            'message': message
+                        }
+                
+                # Check if local file exists
+                if not os.path.exists(local_photo_path):
                     # Try with absolute path
-                    abs_path = os.path.abspath(photo_path)
+                    abs_path = os.path.abspath(local_photo_path)
                     if os.path.exists(abs_path):
                         logger.info(f"[TELEGRAM] Using absolute path: {abs_path}")
-                        photo_path = abs_path
+                        local_photo_path = abs_path
                     else:
-                        error_msg = f"Photo file not found: {photo_path} (also tried {abs_path})"
+                        error_msg = f"Photo file not found: {local_photo_path} (also tried {abs_path})"
                         logger.error(f"[TELEGRAM] {error_msg}")
                         return {
                             'action_type': 'telegram',
@@ -278,7 +338,7 @@ class TelegramActionHandler:
                         }
                 
                 logger.info(f"[TELEGRAM] Sending photo with caption: {message[:50]}...")
-                success = notifier.send_photo(photo_path, caption=message)
+                success = notifier.send_photo(local_photo_path, caption=message)
                 
                 if success:
                     logger.info(f"[TELEGRAM] ✓ Photo sent successfully")
