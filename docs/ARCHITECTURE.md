@@ -758,7 +758,7 @@ print(executor.list_available_actions())
 ActionExecutor → ActionRegistry.get_handler(type) → Handler.execute()
 ```
 
-See [ACTION_HANDLERS.md](ACTION_HANDLERS.md) for creating custom action handlers.
+See [Action Handler Guide](guides/ACTION_HANDLERS_GUIDE.md) for creating custom action handlers.
 
 #### `action_handlers.py` - Action Handler Registry
 
@@ -787,6 +787,8 @@ class MyActionHandler:
    - `webhook` - HTTP request (GET/POST/PUT) to external services
    - `log` - Console logging (for debugging)
    - `create_watch` - Schedule deferred policy evaluation (see [Watch System](#watch-system))
+   - `reclassify` - Override visitor intent classification
+   - `llm_conversation` - Multi-turn LLM conversation for complex decision-making
 
 4. **Helper Functions**:
    - `substitute_variables(text, vars)` - Replace `{placeholders}`
@@ -806,7 +808,7 @@ class SMSActionHandler:
         return {"success": True, "action_type": "sms"}
 ```
 
-See [ACTION_HANDLERS.md](ACTION_HANDLERS.md) for complete documentation and examples.
+See [Action Handler Guide](guides/ACTION_HANDLERS_GUIDE.md) for complete documentation and examples.
 
 #### `apply.py` - Integration Layer
 
@@ -1674,9 +1676,13 @@ await worker.stop()   # Graceful shutdown
 3. Expire watches past expires_ts
 4. Cleanup soft-deleted watches (30+ days)
 
-#### CreateWatchActionHandler (`packages/policy/actions/create_watch_handler.py`)
+#### Action Handlers (`packages/policy/actions/`)
 
-Policy action handler for creating watches:
+Extensible action handlers for policy execution:
+
+**CreateWatchActionHandler** (`create_watch_handler.py`):
+
+Schedule deferred policy evaluation:
 
 ```python
 # In policy YAML:
@@ -1696,6 +1702,48 @@ actions:
 ```
 
 **Deduplication**: Same track + same watch_type won't create duplicate watches
+
+**ReclassifyActionHandler** (`reclassify_handler.py`):
+
+Override visitor intent classification based on temporal context:
+
+```python
+# In policy YAML:
+actions:
+  - type: reclassify
+    event_id: "{event_id}"
+    intent: "delivery_arriving"
+    confidence: 0.85
+    reason: "Active delivery expectation window"
+```
+
+Useful for scheduled events (delivery windows) to override uncertain classifications.
+
+**LLMConversationActionHandler** (`llm_conversation_handler.py`):
+
+Initiate multi-turn conversation with LLM for complex decision-making:
+
+```python
+# In policy YAML:
+actions:
+  - type: llm_conversation
+    initial_greeting: "Hello! Can I help you?"
+    max_turns: 5
+    enable_voiceprint: true
+    context:
+      scenario: "unknown_visitor"
+```
+
+**LLM Capabilities**:
+- Ask follow-up questions (activate_asr)
+- Speak to visitors (speak_to_visitor)
+- Query context (query_policy_context)
+- Reclassify visitor intent based on conversation (reclassify_visitor)
+- Execute actions (execute_action: unlock_door, send_alert, deny_access)
+
+**Integration**: Works with Echonet edge devices for natural multi-turn conversations.
+
+**Requirements**: LLM backend configured (Vicuna/Claude/OpenAI), optional ASR/TTS services.
 
 ### Example Policies
 

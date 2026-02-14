@@ -4,7 +4,7 @@ Model Context Protocol (MCP) server for the EchoBell Policy API. Provides progra
 
 ## Overview
 
-The MCP server exposes 14 tools for interacting with the EchoBell policy engine:
+The MCP server exposes 24 tools for interacting with the EchoBell policy engine:
 
 ### Policy Management (6 tools)
 - `list_policies` - List all policy rules
@@ -20,13 +20,29 @@ The MCP server exposes 14 tools for interacting with the EchoBell policy engine:
 - `get_visit_history` - Retrieve visit history by plate/person
 
 ### Scheduled Events (3 tools)
-- `list_scheduled_events` - List scheduled events
-- `create_scheduled_event` - Create time-based events
-- `get_active_events` - Query events active right now
+- `list_events` - List scheduled events
+- `create_event` - Create time-based events
+- `active_events_now` - Query events active right now
 
-### Evidence & Debugging (2 tools)
-- `get_scene_evidence` - Get all evidence for a track
-- `explain_policy_match` - Explain policy matching logic
+### Alert History (1 tool)
+- `get_alert_history` - Retrieve recent alert history
+
+### Quiet Hours Management (6 tools)
+- `list_quiet_hours` - List quiet hour schedules
+- `create_quiet_hour` - Create new quiet hour period
+- `update_quiet_hour` - Update existing quiet hour
+- `delete_quiet_hour` - Delete quiet hour schedule
+- `is_quiet_time` - Check if currently in quiet hours
+- `get_active_quiet_hours` - Get currently active quiet hours
+
+### Echonet Voice Interaction (3 tools)
+- `activate_echonet_listening` - Enable continuous voice conversation
+- `deactivate_echonet_listening` - Disable listening mode
+- `get_echonet_status` - Get Echonet device status
+
+### Visitor Reclassification (2 tools)
+- `reclassify_visitor_intent` - Correct visitor intent classification
+- `get_visitor_event` - Get visitor event details with audit trail
 
 ---
 
@@ -296,7 +312,167 @@ Tool call:
 }
 ```
 
-### Evidence & Debugging
+### Alert History
+
+#### Get Recent Alerts
+```
+Show me the last 20 alerts from camera 1
+```
+
+Response:
+```json
+{
+  "count": 20,
+  "alerts": [
+    {
+      "id": 1234,
+      "camera_id": 1,
+      "policy_id": "night_unknown_vehicle",
+      "message": "Unknown vehicle detected at night",
+      "timestamp": 1737843600,
+      "track_key": "vehicle_XYZ789"
+    }
+  ]
+}
+```
+
+### Quiet Hours Management
+
+#### Create Quiet Hours
+```
+Create a quiet hour period for weekday nights from 10 PM to 7 AM
+```
+
+Example (Monday night):
+```json
+{
+  "name": "Weeknight Sleep",
+  "weekday": 0,
+  "start_time": "22:00",
+  "end_time": "07:00",
+  "enabled": true
+}
+```
+
+#### Check Quiet Time Status
+```
+Is it currently quiet time?
+```
+
+Response:
+```json
+{
+  "is_quiet_time": true,
+  "active_periods": [
+    {
+      "id": 5,
+      "name": "Weeknight Sleep",
+      "weekday": 0,
+      "start_time": "22:00",
+      "end_time": "07:00"
+    }
+  ]
+}
+```
+
+### Echonet Voice Interaction
+
+#### Activate Listening Mode
+```
+Activate listening mode to ask the user for clarification
+```
+
+This enables continuous conversation without requiring the wake word to be repeated.
+
+#### Get Echonet Status
+```
+What's the status of all Echonet devices?
+```
+
+Response:
+```json
+{
+  "devices": [
+    {
+      "url": "http://192.168.1.50:8123",
+      "registered_targets": ["echobell"],
+      "listening_mode": "trigger",
+      "status": "ready"
+    }
+  ]
+}
+```
+
+### Visitor Reclassification
+
+#### Reclassify Visitor Intent
+```
+Reclassify visitor event evt_123456 - they said they have a package, add evidence that uniform is UPS
+```
+
+Tool call:
+```json
+{
+  "event_id": "evt_123456",
+  "additional_evidence": [
+    {
+      "source": "llm",
+      "key": "uniform_type",
+      "value": "ups",
+      "conf": 0.95
+    }
+  ],
+  "reason": "Visitor stated they have a package during conversation, visual analysis missed UPS uniform"
+}
+```
+
+Response:
+```json
+{
+  "status": "reclassified",
+  "event_id": "evt_123456",
+  "old_intent": "unknown",
+  "new_intent": "delivery_arriving",
+  "confidence": 0.92,
+  "reason": "Added uniform evidence from voice conversation"
+}
+```
+
+#### Get Visitor Event Details
+```
+Show me the full details and reclassification history for visitor event evt_123456
+```
+
+Response:
+```json
+{
+  "event_id": "evt_123456",
+  "camera_id": 1,
+  "timestamp": 1737843600,
+  "track_key": "person_98765",
+  "current_intent": "delivery_arriving",
+  "confidence": 0.92,
+  "evidence": [
+    {"source": "vision", "key": "class", "value": "person", "conf": 0.98},
+    {"source": "llm", "key": "uniform_type", "value": "ups", "conf": 0.95}
+  ],
+  "reclassification_history": [
+    {
+      "timestamp": 1737843650,
+      "old_intent": "unknown",
+      "new_intent": "delivery_arriving",
+      "reason": "Visitor stated they have a package during conversation",
+      "source": "llm_conversation"
+    }
+  ]
+}
+```
+
+---
+
+## Deprecated Usage Examples
+
+### Evidence & Debugging (OLD)
 
 #### Get Scene Evidence
 ```
@@ -601,9 +777,280 @@ Get all events active at a specific time.
 
 ---
 
-### `get_scene_evidence`
+### `get_alert_history`
+
+Retrieve recent alert history, optionally filtered by camera.
+
+**Parameters:**
+- `camera_id` (integer, optional): Filter by camera ID
+- `limit` (integer, optional): Maximum alerts to return (default 100)
+
+**Returns:**
+```json
+{
+  "count": 50,
+  "alerts": [
+    {
+      "id": 1234,
+      "camera_id": 1,
+      "policy_id": "night_alert",
+      "message": "Motion detected",
+      "timestamp": 1737843600
+    }
+  ]
+}
+```
+
+---
+
+### `list_quiet_hours`
+
+List all quiet hour schedules.
+
+**Parameters:**
+- `weekday` (integer, optional): Filter by weekday (0=Monday, 6=Sunday)
+- `enabled_only` (boolean, optional): Only return enabled schedules (default true)
+
+**Returns:**
+```json
+{
+  "count": 7,
+  "quiet_hours": [
+    {
+      "id": 1,
+      "name": "Weeknight Sleep",
+      "weekday": 0,
+      "start_time": "22:00",
+      "end_time": "07:00",
+      "enabled": true
+    }
+  ]
+}
+```
+
+---
+
+### `create_quiet_hour`
+
+Create a new quiet hour schedule.
+
+**Parameters:**
+- `name` (string, required): Name for this period (e.g., "Sleep", "Work Hours")
+- `weekday` (integer, required): Day of week (0=Monday, 6=Sunday)
+- `start_time` (string, required): Start time in HH:MM format (24-hour)
+- `end_time` (string, required): End time in HH:MM format (can span overnight)
+- `enabled` (boolean, optional): Whether active (default true)
+
+**Returns:**
+```json
+{
+  "status": "created",
+  "quiet_hour_id": 8,
+  "name": "Weekend Sleep",
+  "weekday": 5,
+  "start_time": "23:00",
+  "end_time": "09:00"
+}
+```
+
+---
+
+### `update_quiet_hour`
+
+Update an existing quiet hour schedule.
+
+**Parameters:**
+- `quiet_hour_id` (integer, required): ID to update
+- `name` (string, optional): New name
+- `weekday` (integer, optional): New weekday
+- `start_time` (string, optional): New start time
+- `end_time` (string, optional): New end time
+- `enabled` (boolean, optional): New enabled status
+
+**Returns:**
+```json
+{
+  "status": "updated",
+  "quiet_hour_id": 8
+}
+```
+
+---
+
+### `delete_quiet_hour`
+
+Delete a quiet hour schedule.
+
+**Parameters:**
+- `quiet_hour_id` (integer, required): ID to delete
+
+**Returns:**
+```json
+{
+  "status": "deleted",
+  "quiet_hour_id": 8
+}
+```
+
+---
+
+### `is_quiet_time`
+
+Check if currently in quiet hours.
+
+**Parameters:**
+- `timestamp` (integer, optional): Unix timestamp to check (defaults to now)
+
+**Returns:**
+```json
+{
+  "is_quiet_time": true,
+  "timestamp": 1737843600
+}
+```
+
+---
+
+### `get_active_quiet_hours`
+
+Get all currently active quiet hour schedules.
+
+**Parameters:**
+- `timestamp` (integer, optional): Unix timestamp to check (defaults to now)
+
+**Returns:**
+```json
+{
+  "count": 1,
+  "active_periods": [
+    {
+      "id": 1,
+      "name": "Weeknight Sleep",
+      "weekday": 0,
+      "start_time": "22:00",
+      "end_time": "07:00"
+    }
+  ]
+}
+```
+
+---
+
+### `activate_echonet_listening`
+
+Activate continuous listening mode on Echonet device for multi-turn conversation.
+
+**Parameters:**
+- `echonet_url` (string, optional): Echonet base URL (auto-discovers if omitted)
+- `target_name` (string, optional): Target name (default "echobell")
+- `reason` (string, optional): Human-readable reason for activation
+
+**Returns:**
+```json
+{
+  "status": "activated",
+  "listening_mode": "open",
+  "timeout_seconds": 30
+}
+```
+
+---
+
+### `deactivate_echonet_listening`
+
+Deactivate listening mode and return to trigger mode.
+
+**Parameters:**
+- `echonet_url` (string, optional): Echonet base URL
+- `target_name` (string, optional): Target name (default "echobell")
+- `reason` (string, optional): Reason for deactivation
+
+**Returns:**
+```json
+{
+  "status": "deactivated",
+  "listening_mode": "trigger"
+}
+```
+
+---
+
+### `get_echonet_status`
+
+Get status of all discovered Echonet instances.
+
+**Parameters:** None
+
+**Returns:**
+```json
+{
+  "devices": [
+    {
+      "url": "http://192.168.1.50:8123",
+      "registered_targets": ["echobell"],
+      "listening_mode": "trigger",
+      "status": "ready"
+    }
+  ]
+}
+```
+
+---
+
+### `reclassify_visitor_intent`
+
+Reclassify a visitor's intent by adding evidence or directly overriding.
+
+**Parameters:**
+- `event_id` (string, required): Visitor event ID to reclassify
+- `additional_evidence` (array, optional): Evidence to inject before re-classification
+  - Each evidence object should have: `source`, `key`, `value`, `conf` (0-1), optional `object_id`
+- `override_intent` (string, optional): Direct intent override (bypasses classification)
+- `override_confidence` (float, optional): Confidence for override (0-1)
+- `reason` (string, optional): Explanation for audit trail
+
+**Returns:**
+```json
+{
+  "status": "reclassified",
+  "event_id": "evt_123456",
+  "old_intent": "unknown",
+  "new_intent": "delivery_arriving",
+  "confidence": 0.92,
+  "method": "evidence_injection"
+}
+```
+
+---
+
+### `get_visitor_event`
+
+Get detailed visitor event information including reclassification history.
+
+**Parameters:**
+- `event_id` (string, required): Visitor event ID
+
+**Returns:**
+```json
+{
+  "event_id": "evt_123456",
+  "camera_id": 1,
+  "timestamp": 1737843600,
+  "track_key": "person_98765",
+  "current_intent": "delivery_arriving",
+  "confidence": 0.92,
+  "evidence": [...],
+  "reclassification_history": [...]
+}
+```
+
+---
+
+### `get_scene_evidence` (DEPRECATED)
 
 Get all evidence for a specific scene track.
+
+**Note:** This tool is deprecated. Use `query_scene_context` instead for comprehensive scene information.
 
 **Parameters:**
 - `camera_id` (integer, required): Camera ID
@@ -622,9 +1069,11 @@ Get all evidence for a specific scene track.
 
 ---
 
-### `explain_policy_match`
+### `explain_policy_match` (DEPRECATED)
 
 Explain why a policy matched or didn't match.
+
+**Note:** This tool is deprecated. Use `evaluate_policy` instead for policy testing.
 
 **Parameters:**
 - `policy_id` (string, required): Policy ID to explain
@@ -701,6 +1150,26 @@ Explain why a policy matched or didn't match.
 3. **Review visit history:**
    ```
    Show me the last 10 visits for plate ABC123
+   ```
+
+### Correcting Visitor Classification
+
+1. **Get visitor event details:**
+   ```
+   Show me visitor event evt_123456
+   ```
+
+2. **Review the classification:**
+   Check the current intent, confidence, and evidence.
+
+3. **Reclassify with additional evidence:**
+   ```
+   Reclassify evt_123456 - add evidence that uniform is UPS because visitor said they have a package
+   ```
+
+4. **Verify the reclassification:**
+   ```
+   Show me the reclassification history for evt_123456
    ```
 
 ---

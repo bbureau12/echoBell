@@ -392,6 +392,15 @@ Define variables in the policy:
 
 Actions define WHAT happens when a policy matches.
 
+**Available Action Types**:
+- **telegram** - Send Telegram notification (with optional photo)
+- **speak** - Text-to-speech message
+- **webhook** - HTTP POST to external service
+- **create_watch** - Schedule deferred policy evaluation
+- **llm_conversation** - Multi-turn LLM conversation for complex decisions
+- **reclassify** - Override visitor intent classification
+- **log** - Simple console logging (for debugging)
+
 ### Telegram Action
 
 Send a message to Telegram (with optional photo).
@@ -522,6 +531,94 @@ Schedule deferred policy evaluation (advanced).
   }]
 }
 ```
+
+### LLM Conversation Action
+
+Initiate multi-turn conversation with the LLM for complex decision-making.
+
+```json
+{
+  "type": "llm_conversation",
+  "initial_greeting": "Hello! Can I help you?",
+  "max_turns": 5,
+  "enable_voiceprint": true,
+  "context": {
+    "scenario": "unknown_visitor"
+  }
+}
+```
+
+**When to Use**:
+- Unknown visitor requiring identification
+- Ambiguous intent needing clarification
+- Security decisions requiring confirmation
+- Complex multi-step interactions
+
+**LLM Capabilities**:
+The LLM can use these tools during conversation:
+- **activate_asr**: Ask visitor a question and wait for spoken response
+- **speak_to_visitor**: Speak a message without waiting for response
+- **query_policy_context**: Get additional context (trusted faces, recent visits, etc.)
+- **reclassify_visitor**: Reclassify visitor intent based on conversation (e.g., unknown → delivery_arriving)
+- **execute_action**: Complete conversation with a decision (unlock_door, send_alert, deny_access, no_action)
+
+**Parameters**:
+- `initial_greeting`: Optional greeting to start conversation
+- `audio_path`: Optional path to initial audio (or use from context)
+- `max_turns`: Maximum conversation turns (default: 10)
+- `enable_voiceprint`: Whether to attempt speaker identification (default: true)
+- `llm_provider`: Optional LLM provider override (vicuna/claude/openai)
+- `context`: Additional context for the LLM
+
+**Example: Unknown Visitor**
+```json
+{
+  "id": "unknown_visitor_llm",
+  "name": "Unknown Visitor - LLM Conversation",
+  "enabled": 1,
+  "priority": 85,
+  "conditions": {
+    "all": [
+      {"evidence_exists": {"source": "vision", "feature": "person_present"}},
+      {"evidence_missing": {"source": "face_trust", "feature": "trusted_person"}}
+    ]
+  },
+  "actions": [{
+    "type": "llm_conversation",
+    "initial_greeting": "Hello! I don't recognize you. Can I help you?",
+    "max_turns": 5,
+    "context": {
+      "scenario": "unknown_visitor",
+      "security_level": "medium"
+    }
+  }]
+}
+```
+
+**Example Conversation Flow**:
+```
+Policy: Detects unknown person
+LLM: "Hello! I don't recognize you. Can I help you?"
+Visitor: "I'm here to deliver a package"
+LLM: [Uses reclassify_visitor: intent=delivery_arriving, reason="Visitor stated package delivery"]
+LLM: [Uses activate_asr] "What's the tracking number?"
+Visitor: "1Z999AA1234567890"
+LLM: [Validates] [Uses execute_action: unlock_door]
+LLM: "Thank you! The gate is unlocked."
+```
+
+**Integration with Echonet**:
+When used with Echonet edge devices, the LLM can activate "open listening" mode for natural multi-turn conversations without requiring the wake word between turns.
+
+**Requirements**:
+- LLM package installed (`packages/llm/`)
+- LLM backend configured (Vicuna/Claude/OpenAI)
+- Optional: ASR service for multi-turn conversations
+- Optional: TTS service for speaking to visitors
+- Optional: Voiceprint service for speaker identification
+
+**Configuration**:
+See `config/llm_config.toml` for LLM backend settings.
 
 ---
 
@@ -668,6 +765,57 @@ Schedule deferred policy evaluation (advanced).
     "message": "📦 Delivery window ended - no package detected"
   }]
 }
+```
+
+### Pattern: LLM Conversation for Unknown Visitor
+
+```json
+{
+  "id": "unknown_visitor_llm",
+  "name": "Unknown Visitor - LLM Handles Interaction",
+  "enabled": 1,
+  "priority": 85,
+  "conditions": {
+    "all": [
+      {"evidence_exists": {"source": "vision", "feature": "person_present"}},
+      {"evidence_missing": {"source": "face_trust", "feature": "trusted_person"}},
+      {"evidence_exists": {"source": "audio", "feature": "transcript"}}
+    ]
+  },
+  "actions": [{
+    "type": "llm_conversation",
+    "initial_greeting": "Hello! I don't recognize you. Can I help you?",
+    "max_turns": 5,
+    "enable_voiceprint": true,
+    "context": {
+      "scenario": "unknown_visitor",
+      "security_level": "medium",
+      "camera_location": "front_door"
+    }
+  }]
+}
+```
+
+**How this works**:
+1. Policy detects unknown person with audio
+2. LLM initiates conversation with greeting
+3. LLM can ask follow-up questions (activate_asr)
+4. LLM can reclassify visitor based on responses (reclassify_visitor)
+5. LLM can query context (trusted faces, recent visits)
+6. LLM makes final decision (unlock_door, send_alert, deny_access)
+7. Conversation completes with action execution
+
+**Example conversation flow**:
+```
+LLM: "Hello! I don't recognize you. Can I help you?"
+Visitor: "I'm here to deliver a package."
+LLM: [reclassify_visitor: intent="delivery_arriving", confidence=0.95]
+LLM: [activate_asr] "Great! What's the tracking number?"
+Visitor: "1Z999AA10123456789"
+LLM: [query_policy_context: active_events]
+LLM: [Validates delivery expectation]
+LLM: [execute_action: unlock_door]
+LLM: "Thank you! The gate is unlocked. Please leave the package by the door."
 ```
 
 ---

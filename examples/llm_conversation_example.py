@@ -171,9 +171,10 @@ async def example_policy_integration():
         "actions": [
             {
                 "type": "llm_conversation",
-                "parameters": {
-                    "initial_greeting": "Hello! Can I help you?",
-                    "max_turns": 5
+                "initial_greeting": "Hello! Can I help you?",
+                "max_turns": 5,
+                "context": {
+                    "scenario": "unknown_visitor"
                 }
             }
         ]

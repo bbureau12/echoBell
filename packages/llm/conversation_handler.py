@@ -351,6 +351,106 @@ class ConversationHandler:
             
             return {"status": "continue"}
         
+        elif tool_name == "reclassify_visitor":
+            # Reclassify visitor intent based on conversation
+            event_id = conversation.policy_context.get("event_id")
+            new_intent = params.get("intent")
+            confidence = params.get("confidence", 0.95)
+            reason = params.get("reason", "LLM conversation reclassification")
+            
+            if not event_id:
+                # No event to reclassify
+                conversation.messages.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": json.dumps({
+                            "success": False,
+                            "error": "No event_id in context"
+                        })
+                    }]
+                })
+                return {"status": "continue"}
+            
+            # Import reclassify service
+            try:
+                # Import from services if available (policy server context)
+                import sys
+                import os
+                central_path = os.path.join(os.path.dirname(__file__), '..', '..', 'central', 'policy-server')
+                if os.path.exists(central_path) and central_path not in sys.path:
+                    sys.path.insert(0, central_path)
+                
+                from services import reclassify_visitor_intent
+                
+                # Add evidence based on LLM understanding
+                additional_evidence = params.get("additional_evidence", [])
+                
+                result = reclassify_visitor_intent(
+                    conn=self.conn,
+                    event_id=event_id,
+                    additional_evidence=additional_evidence,
+                    override_intent=new_intent,
+                    override_confidence=confidence,
+                    reason=reason,
+                    reclassified_by="llm"
+                )
+                
+                conversation.messages.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": json.dumps(result)
+                    }]
+                })
+                
+                return {"status": "continue"}
+                
+            except ImportError:
+                # Fallback: direct database update
+                try:
+                    self.conn.execute("""
+                        UPDATE visitor_events
+                        SET intent_inferred = ?,
+                            intent_confidence = ?,
+                            updated_ts = ?
+                        WHERE event_id = ?
+                    """, (new_intent, confidence, int(datetime.now().timestamp()), event_id))
+                    self.conn.commit()
+                    
+                    conversation.messages.append({
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": json.dumps({
+                                "success": True,
+                                "event_id": event_id,
+                                "new_intent": new_intent,
+                                "confidence": confidence,
+                                "method": "direct_update"
+                            })
+                        }]
+                    })
+                    
+                    return {"status": "continue"}
+                    
+                except Exception as e:
+                    conversation.messages.append({
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": json.dumps({
+                                "success": False,
+                                "error": str(e)
+                            })
+                        }]
+                    })
+                    return {"status": "continue"}
+        
         else:
             # Unknown tool
             conversation.messages.append({
@@ -468,6 +568,55 @@ class ConversationHandler:
                     },
                     "required": ["query_type"]
                 }
+            },
+            {
+                "name": "reclassify_visitor",
+                "description": "Reclassify visitor intent based on information learned during conversation. Use when visitor provides information that changes their classification (e.g., unknown person states they have a delivery).",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "intent": {
+                            "type": "string",
+                            "enum": [
+                                "delivery_arriving",
+                                "delivery_departing",
+                                "trusted_visitor",
+                                "solicitor",
+                                "maintenance",
+                                "emergency",
+                                "friend_family",
+                                "unknown"
+                            ],
+                            "description": "New intent classification based on conversation"
+                        },
+                        "confidence": {
+                            "type": "number",
+                            "description": "Confidence in new classification (0.0-1.0)",
+                            "minimum": 0.0,
+                            "maximum": 1.0,
+                            "default": 0.95
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Explanation for reclassification"
+                        },
+                        "additional_evidence": {
+                            "type": "array",
+                            "description": "Optional additional evidence items to support reclassification",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "source": {"type": "string"},
+                                    "key": {"type": "string"},
+                                    "value": {"type": "string"},
+                                    "confidence": {"type": "number"}
+                                }
+                            },
+                            "default": []
+                        }
+                    },
+                    "required": ["intent", "reason"]
+                }
             }
         ]
     
@@ -480,6 +629,7 @@ class ConversationHandler:
 Your role:
 - Analyze doorbell interactions (audio transcripts, visitor context)
 - Ask clarifying questions when needed (use activate_asr tool)
+- Reclassify visitor intent based on conversation (use reclassify_visitor tool)
 - Make decisions about access control
 - Execute appropriate actions (unlock, alert, deny)
 
@@ -488,6 +638,7 @@ Guidelines:
 - Ask for clarification when uncertain
 - Prioritize security (deny if suspicious)
 - Use quiet hours and scheduled events context
+- Reclassify visitors when they provide identifying information (e.g., "I have a package" → delivery_arriving)
 - Complete with execute_action when decision is made
 
 Available actions:
@@ -496,7 +647,7 @@ Available actions:
 - deny_access: Politely decline
 - no_action: Just log the interaction
 
-Use tools to gather context and interact with the visitor.
+Use tools to gather context, reclassify visitors, and interact with them.
 
 When using tools, respond with JSON format:
 {"tool": "tool_name", "parameters": {...}}

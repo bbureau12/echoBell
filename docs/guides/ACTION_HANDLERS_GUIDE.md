@@ -159,6 +159,87 @@ actions:
     level: INFO  # DEBUG, INFO, WARNING, ERROR
 ```
 
+### 5. Create Watch (`create_watch`)
+
+Schedule deferred policy evaluation for time-based triggers.
+
+**Configuration**:
+```yaml
+actions:
+  - type: create_watch
+    watch_type: "loitering_2min"
+    due_in_seconds: 120
+    expires_in_seconds: 300
+```
+
+**Use Cases**:
+- Loitering detection (alert after N minutes if still present)
+- Delivery timeouts (alert if package not picked up)
+- Escalation chains (2min → 5min → 10min alerts)
+
+**See also**: [Watch System](../ARCHITECTURE.md#watch-system)
+
+### 6. Reclassify (`reclassify`)
+
+Override visitor intent classification based on temporal context.
+
+**Configuration**:
+```yaml
+actions:
+  - type: reclassify
+    event_id: "{event_id}"
+    intent: "delivery_arriving"
+    confidence: 0.85
+    reason: "Active delivery expectation window"
+```
+
+**Use Cases**:
+- Scheduled delivery windows override uncertain classifications
+- Temporal context improves intent accuracy
+- Policy-driven classification corrections
+
+**Implementation**: `packages/policy/actions/reclassify_handler.py`
+
+### 7. LLM Conversation (`llm_conversation`)
+
+Initiate multi-turn conversation with LLM for complex decision-making.
+
+**Configuration**:
+```yaml
+actions:
+  - type: llm_conversation
+    initial_greeting: "Hello! Can I help you?"
+    max_turns: 5
+    enable_voiceprint: true
+    context:
+      scenario: "unknown_visitor"
+      security_level: "medium"
+```
+
+**LLM Capabilities**:
+- Ask follow-up questions via activate_asr
+- Speak to visitors via speak_to_visitor
+- Query policy context (trusted faces, recent visits)
+- Reclassify visitor intent based on conversation (reclassify_visitor)
+- Execute final actions (unlock_door, send_alert, deny_access)
+
+**Use Cases**:
+- Unknown visitor requiring identification
+- Ambiguous intent needing clarification
+- Security decisions requiring confirmation
+- Complex multi-step interactions
+
+**Requirements**:
+- LLM backend configured (Vicuna/Claude/OpenAI)
+- Optional: ASR/TTS services for voice interaction
+- Optional: Voiceprint service for speaker identification
+
+**Configuration**: See `config/llm_config.toml`
+
+**Implementation**: `packages/policy/actions/llm_conversation_handler.py`
+
+**Integration**: Works with Echonet edge devices for natural multi-turn conversations without wake word repetition.
+
 ---
 
 ## Creating Custom Action Handlers
